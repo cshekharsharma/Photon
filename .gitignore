@@ -1,0 +1,61 @@
+# Go build artifacts
+/bin/
+/gofurr
+*.test
+*.out
+__debug_bin*
+
+# Test coverage
+coverage.*
+*.coverprofile
+*.cov
+*.lcov
+*.prof
+
+# IDE/editor-specific
+.idea/
+.vscode/
+*.swp
+*.swo
+*.swn
+*.sublime-workspace
+*.sublime-project
+
+# OS-level junk
+.DS_Store
+Thumbs.db
+
+# Project-specific
+.project
+.settings
+.buildpath
+*.ptp-sync-folder
+/.ptp-sync/
+RELEASE
+
+# Logs
+*.log
+logs/
+data/logs/
+
+# Secrets/config
+config/config.json
+.env
+.env.*
+*.key
+*.pem
+
+# Dependency/package managers (optional)
+vendor/
+go.sum.tmp
+
+# Data or generated assets
+data/
+tmp/
+*.tmp
+
+# Snapshots or artifacts
+*.snap
+*.cache
+*.bak
+*.old

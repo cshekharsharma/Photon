@@ -1,0 +1,354 @@
+package caching
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/cshekharsharma/photon/storage/redis"
+	redisv9 "github.com/redis/go-redis/v9"
+)
+
+// RedisCache provides a caching layer backed by Redis.
+type RedisCache struct {
+	client      redis.RedisInterface
+	clusterName string
+	namespace   string
+	collection  string
+}
+
+var redisSerializeValue = func(r *RedisCache, val any) ([]byte, error) {
+	return r.getSerialisedValue(val)
+}
+
+type redisSetCommand struct {
+	key        string
+	value      []byte
+	expiration time.Duration
+}
+
+var redisPipelineSet = func(ctx context.Context, client redis.RedisClientInterface, commands []redisSetCommand) ([]*redisv9.StatusCmd, error) {
+	pipelined, ok := client.(interface {
+		Pipeline() redisv9.Pipeliner
+	})
+	if !ok {
+		return nil, errors.New("redis client does not support pipelining")
+	}
+
+	pipe := pipelined.Pipeline()
+	results := make([]*redisv9.StatusCmd, 0, len(commands))
+	for _, command := range commands {
+		results = append(results, pipe.Set(ctx, command.key, command.value, command.expiration))
+	}
+
+	_, err := pipe.Exec(ctx)
+	return results, err
+}
+
+// NewRedisCache initializes a new RedisCache instance using the provided options.
+func NewRedisCache(opts *Options, connector redis.RedisConnectorInterface) (*RedisCache, error) {
+	redis.SetConnectionConfig(opts.Cluster, &redis.ConnectionConfig{
+		Address:  opts.Hosts[0], // Redis typically uses a single address
+		Username: opts.Username,
+		Password: opts.Password,
+	})
+
+	client, err := redis.Connect(connector, opts.Cluster)
+	if err != nil {
+		return nil, err
+	}
+
+	return &RedisCache{
+		client:      client,
+		clusterName: opts.Cluster,
+		namespace:   opts.Namespace,
+		collection:  opts.Collection,
+	}, nil
+}
+
+// Exists checks if the key exists in Redis.
+func (r *RedisCache) Exists(request *ExistsRequest) (bool, error) {
+	return r.ExistsContext(context.Background(), request)
+}
+
+func (r *RedisCache) ExistsContext(ctx context.Context, request *ExistsRequest) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	key := r.formatKey(request.Namespace, request.Collection, request.Key)
+
+	count, err := r.client.GetClient().Exists(ctx, key).Result()
+	return count == 1, err
+}
+
+// Get retrieves a value from Redis.
+func (r *RedisCache) Get(request *GetRequest) (any, error) {
+	return r.GetContext(context.Background(), request)
+}
+
+func (r *RedisCache) GetContext(ctx context.Context, request *GetRequest) (any, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	key := r.formatKey(request.Namespace, request.Collection, request.Key)
+
+	result, err := r.client.GetClient().Get(ctx, key).Bytes()
+	if err == redisv9.Nil {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// Set stores a key-value pair in Redis with optional TTL.
+func (r *RedisCache) Set(request *SetRequest) (bool, error) {
+	return r.SetContext(context.Background(), request)
+}
+
+func (r *RedisCache) SetContext(ctx context.Context, request *SetRequest) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	key := r.formatKey(request.Namespace, request.Collection, request.Key)
+
+	valueBytes, err := redisSerializeValue(r, request.Value)
+	if err != nil {
+		return false, err
+	}
+
+	status := r.client.GetClient().Set(ctx, key, valueBytes, time.Duration(request.TTL)*time.Second)
+	return status.Err() == nil, status.Err()
+}
+
+// Delete removes a key from Redis.
+func (r *RedisCache) Delete(request *DeleteRequest) (bool, error) {
+	return r.DeleteContext(context.Background(), request)
+}
+
+func (r *RedisCache) DeleteContext(ctx context.Context, request *DeleteRequest) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	key := r.formatKey(request.Namespace, request.Collection, request.Key)
+
+	count, err := r.client.GetClient().Del(ctx, key).Result()
+	return count > 0, err
+}
+
+// MultiGet retrieves multiple keys in batch.
+func (r *RedisCache) MultiGet(request *MultiGetRequest) (map[string]any, error) {
+	return r.MultiGetContext(context.Background(), request)
+}
+
+func (r *RedisCache) MultiGetContext(ctx context.Context, request *MultiGetRequest) (map[string]any, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	formattedKeys := make([]string, len(request.Keys))
+
+	for i, k := range request.Keys {
+		formattedKeys[i] = r.formatKey(request.Namespace, request.Collection, k)
+	}
+
+	values, err := r.client.GetClient().MGet(ctx, formattedKeys...).Result()
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]any)
+	for i, val := range values {
+		if val != nil {
+			originalKey := request.Keys[i]
+			result[originalKey] = val
+		}
+	}
+
+	return result, nil
+}
+
+// MultiSet stores multiple key-value pairs in one batch.
+func (r *RedisCache) MultiSet(request *MultiSetRequest) (map[string]bool, error) {
+	return r.MultiSetContext(context.Background(), request)
+}
+
+func (r *RedisCache) MultiSetContext(ctx context.Context, request *MultiSetRequest) (map[string]bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	result := make(map[string]bool)
+	logicalKeys := make([]string, 0, len(request.ValueMap))
+	commands := make([]redisSetCommand, 0, len(request.ValueMap))
+	var firstErr error
+
+	for k, v := range request.ValueMap {
+		valueBytes, err := redisSerializeValue(r, v)
+		if err != nil {
+			result[k] = false
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+
+		logicalKeys = append(logicalKeys, k)
+		commands = append(commands, redisSetCommand{
+			key:        r.formatKey(request.Namespace, request.Collection, k),
+			value:      valueBytes,
+			expiration: time.Duration(request.TTL) * time.Second,
+		})
+	}
+
+	if len(commands) == 0 {
+		return result, firstErr
+	}
+
+	statuses, err := redisPipelineSet(ctx, r.client.GetClient(), commands)
+	if err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	for i, logicalKey := range logicalKeys {
+		if i >= len(statuses) || statuses[i] == nil {
+			result[logicalKey] = false
+			continue
+		}
+		err := statuses[i].Err()
+		result[logicalKey] = err == nil
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	return result, firstErr
+}
+
+// MultiDelete deletes multiple keys.
+func (r *RedisCache) MultiDelete(request *MultiDeleteRequest) (map[string]bool, error) {
+	return r.MultiDeleteContext(context.Background(), request)
+}
+
+func (r *RedisCache) MultiDeleteContext(ctx context.Context, request *MultiDeleteRequest) (map[string]bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	result := make(map[string]bool)
+	var firstErr error
+
+	for _, k := range request.Keys {
+		key := r.formatKey(request.Namespace, request.Collection, k)
+		deleted, err := r.client.GetClient().Del(ctx, key).Result()
+		result[k] = err == nil && deleted > 0
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return result, firstErr
+}
+
+// Increment increases the numeric value for a key.
+func (r *RedisCache) Increment(request *IncrementRequest) error {
+	return r.IncrementContext(context.Background(), request)
+}
+
+func (r *RedisCache) IncrementContext(ctx context.Context, request *IncrementRequest) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	key := r.formatKey(request.Namespace, request.Collection, request.Key)
+
+	_, err := r.client.GetClient().IncrBy(ctx, key, int64(request.Value)).Result()
+	return err
+}
+
+// Decrement decreases the numeric value for a key.
+func (r *RedisCache) Decrement(request *DecrementRequest) error {
+	return r.DecrementContext(context.Background(), request)
+}
+
+func (r *RedisCache) DecrementContext(ctx context.Context, request *DecrementRequest) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	key := r.formatKey(request.Namespace, request.Collection, request.Key)
+
+	_, err := r.client.GetClient().DecrBy(ctx, key, int64(request.Value)).Result()
+	return err
+}
+
+// Append appends data to a string key.
+func (r *RedisCache) Append(request *AppendRequest) error {
+	return r.AppendContext(context.Background(), request)
+}
+
+func (r *RedisCache) AppendContext(ctx context.Context, request *AppendRequest) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	key := r.formatKey(request.Namespace, request.Collection, request.Key)
+
+	valueBytes, err := redisSerializeValue(r, request.Value)
+	if err != nil {
+		return err
+	}
+
+	_, err = r.client.GetClient().Append(ctx, key, string(valueBytes)).Result()
+	return err
+}
+
+// GetTTL returns the remaining TTL for a key.
+func (r *RedisCache) GetTTL(request *GetTTLRequest) (int64, error) {
+	return r.GetTTLContext(context.Background(), request)
+}
+
+func (r *RedisCache) GetTTLContext(ctx context.Context, request *GetTTLRequest) (int64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	key := r.formatKey(request.Namespace, request.Collection, request.Key)
+
+	duration, err := r.client.GetClient().TTL(ctx, key).Result()
+	if err != nil {
+		return 0, err
+	}
+	return int64(duration.Seconds()), nil
+}
+
+// SetTTL updates the TTL for a key.
+func (r *RedisCache) SetTTL(request *SetTTLRequest) error {
+	return r.SetTTLContext(context.Background(), request)
+}
+
+func (r *RedisCache) SetTTLContext(ctx context.Context, request *SetTTLRequest) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	key := r.formatKey(request.Namespace, request.Collection, request.Key)
+
+	_, err := r.client.GetClient().Expire(ctx, key, time.Duration(request.TTL)*time.Second).Result()
+	return err
+}
+
+// formatKey creates a full Redis key using namespace, collection, and key.
+func (r *RedisCache) formatKey(namespace, collection, key string) string {
+	return fmt.Sprintf("%s:%s:%s", namespace, collection, key)
+}
+
+// getSerialisedValue serializes the value into []byte.
+func (r *RedisCache) getSerialisedValue(val any) ([]byte, error) {
+	switch v := val.(type) {
+	case []byte:
+		return v, nil
+	case string:
+		return []byte(v), nil
+	default:
+		b, err := json.Marshal(val)
+		if err != nil {
+			return nil, errors.New("value should be one of {string, byteArray, json serialisable} datatype")
+		}
+		return b, nil
+	}
+}

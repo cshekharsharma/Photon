@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+      - main
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Verify modules
+        run: go mod verify
+
+      - name: Unit tests
+        run: go test ./...
+
+      - name: Race tests
+        run: go test -race ./cloud ./cloud/providers ./cloud/service/aws ./core/logger ./telemetry ./coordination/network/discovery ./coordination/network/watcher ./middleware ./server/grpc/server ./server/http ./storage/aerospike ./storage/memcached ./storage/elasticsearch ./storage/mongo ./storage/mysql ./storage/redis ./utils/rest ./notifier/notifyrclient ./workers
+
+      - name: Critical package coverage
+        run: |
+          set -euo pipefail
+          packages="
+          ./caching
+          ./cloud
+          ./cloud/providers
+          ./cloud/service/aws
+          ./coordination/network/discovery
+          ./coordination/network/watcher
+          ./core/config
+          ./core/features
+          ./core/logger
+          ./core/logger/writers
+          ./middleware
+          ./notifier/notifyrclient
+          ./storage/aerospike
+          ./storage/elasticsearch
+          ./storage/memcached
+          ./storage/mongo
+          ./storage/mysql
+          ./storage/redis
+          ./telemetry
+          ./telemetry/logger
+          ./telemetry/meter
+          ./utils/rest
+          "
+          for pkg in $packages; do
+            profile="$(mktemp)"
+            go test -covermode=atomic -coverprofile="$profile" "$pkg"
+            total=$(go tool cover -func="$profile" | awk '/^total:/ {print substr($3, 1, length($3)-1)}')
+            awk -v total="$total" -v pkg="$pkg" 'BEGIN { if (total + 0 < 100) { printf "%s coverage is %s%%, want 100.0%%\n", pkg, total; exit 1 } else { printf "%s coverage %s%%\n", pkg, total } }'
+          done
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Go fmt
+        run: test -z "$(gofmt -l .)"
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
+
+      - name: Staticcheck
+        run: $(go env GOPATH)/bin/staticcheck ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.13.2
+
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: govulncheck
+        uses: golang/govulncheck-action@v1
+        with:
+          go-package: ./...

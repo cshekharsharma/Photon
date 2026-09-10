@@ -1,0 +1,630 @@
+package mysql
+
+import (
+	"crypto/sha1"
+	"database/sql"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"reflect"
+	"regexp"
+	"slices"
+	"sort"
+	"strings"
+
+	"github.com/cshekharsharma/photon/utils/types"
+	"github.com/pkg/errors"
+)
+
+var helperMySqlConnector MySqlDbConnectorInterface = &MySqlDbConnector{}
+var scanReadRow = func(rows *sql.Rows, dest ...interface{}) error { return rows.Scan(dest...) }
+var getReadColumns = func(rows *sql.Rows) ([]string, error) { return rows.Columns() }
+var newHashWriter = func() hashWriter { return sha1.New() }
+
+type hashWriter interface {
+	Write(p []byte) (n int, err error)
+	Sum(b []byte) []byte
+}
+
+type sqlCloser interface {
+	Close() error
+}
+
+func closeSQLCloser(closer sqlCloser) {
+	if err := closer.Close(); err != nil {
+		return
+	}
+}
+
+// ExecuteReadQuery runs a read-only SELECT query on a given cluster,
+// returning results as a slice of maps where each map represents a row.
+// If CapitaliseColumns is set to true in the input, column names in the result
+// will be capitalized.
+//
+// Parameters:
+//   - cluster: name of the database cluster.
+//   - queryInput: struct containing the query string, parameters, and capitalisation flag.
+//
+// Returns:
+//   - []map[string]interface{}: list of result rows.
+//   - error: any error encountered while querying.
+func ExecuteReadQuery(dbctx *DBContext, queryInput ReadQueryInput) ([]map[string]interface{}, error) {
+	if dbctx == nil {
+		return nil, fmt.Errorf("nil DB context provided, cannot execute the query")
+	}
+
+	stmt, err := dbctx.Prepare(queryInput.Query)
+	if err != nil {
+		return nil, fmt.Errorf("error preparing statement: %w", err)
+	}
+
+	if stmt != nil {
+		defer closeSQLCloser(stmt)
+	}
+
+	rows, err := dbctx.Query(queryInput.Query, queryInput.Params...)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if rows != nil {
+		defer closeSQLCloser(rows)
+	}
+
+	columns, err := getReadColumns(rows)
+	if err != nil {
+		return nil, err
+	}
+
+	var output []map[string]interface{}
+
+	for rows.Next() {
+		values := make([]sql.NullString, len(columns))
+		scanArgs := make([]interface{}, len(columns))
+		for i := range values {
+			scanArgs[i] = &values[i]
+		}
+
+		if err := scanReadRow(rows, scanArgs...); err != nil {
+			return nil, err
+		}
+
+		rowMap := make(map[string]interface{})
+		for i, colName := range columns {
+			if queryInput.CapitaliseColumns {
+				colName = types.UCFirst(colName)
+			}
+			rowMap[colName] = values[i]
+		}
+
+		output = append(output, rowMap)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return output, nil
+}
+
+// ExecuteWriteQuery executes a SQL write query (INSERT/UPDATE/DELETE) using the provided DB context.
+// It supports transactional or direct DB execution based on the DBContext.
+//
+// Parameters:
+//   - dbctx: context containing transaction, connection, or cluster.
+//   - query: SQL query string.
+//   - params: query parameters.
+//
+// Returns:
+//   - rows affected
+//   - last insert ID (0 if not applicable)
+//   - error if any.
+func ExecuteWriteQuery(dbctx *DBContext, query string, params []interface{}) (int64, int64, error) {
+	if dbctx == nil {
+		return 0, 0, fmt.Errorf("nil DB context provided, cannot execute the query")
+	}
+
+	result, err := dbctx.Exec(query, params...)
+
+	if err != nil {
+		return 0, 0, fmt.Errorf("error executing query: %w", err)
+	}
+
+	lastInsertId, err := result.LastInsertId()
+	if err != nil {
+		lastInsertId = 0 // likely a non-INSERT query; defaulting to 0
+	}
+
+	rowsImpacted, err := result.RowsAffected()
+	if err != nil {
+		return 0, 0, fmt.Errorf("error fetching impacted rows: %w", err)
+	}
+
+	return rowsImpacted, lastInsertId, nil
+}
+
+// MultiInsertFromStructsArray performs a bulk insert operation using a slice of structs.
+// Fields are inferred from struct tags, and default values are handled using `omitempty`.
+// Supports JSON marshaling via tag option "marshaljson".
+//
+// Parameters:
+//   - dbctx: database context.
+//   - tableName: target table.
+//   - data: slice of structs to insert.
+//
+// Returns:
+//   - rows affected
+//   - error if any.
+func MultiInsertFromStructsArray[T any](dbctx *DBContext, tableName string, data []T) (int64, error) {
+	if len(data) == 0 {
+		return 0, fmt.Errorf("input data array is empty")
+	}
+
+	query, allValues, err := generateMultiInsertQueriesFromStructArray(tableName, data)
+	if err != nil {
+		return 0, errors.Wrap(err, "error in generating query from input data")
+	}
+
+	if dbctx == nil {
+		return 0, fmt.Errorf("nil DB context provided, cannot execute the query")
+	}
+
+	result, err := dbctx.Exec(query, allValues...)
+
+	if err != nil {
+		return 0, fmt.Errorf("error executing insert: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("error fetching impacted rows: %w", err)
+	}
+
+	return rowsAffected, nil
+}
+
+// generateMultiInsertQueriesFromStructArray constructs an INSERT SQL query string
+// and associated values slice from a slice of structs. Fields are parsed from struct tags.
+//
+// Parameters:
+//   - tableName: target table name.
+//   - data: slice of structs.
+//
+// Returns:
+//   - SQL query string
+//   - slice of values
+//   - error if any.
+func generateMultiInsertQueriesFromStructArray[T any](tableName string, data []T) (string, []interface{}, error) {
+	if len(data) == 0 {
+		return "", nil, fmt.Errorf("no data provided")
+	}
+
+	dataLen := len(data)
+	var queryBuilder strings.Builder
+	fieldsMap := make(map[string]struct{})
+
+	firstRow := data[0]
+	sValue := reflect.ValueOf(firstRow)
+	if sValue.Kind() == reflect.Pointer {
+		sValue = sValue.Elem()
+	}
+	t := sValue.Type()
+
+	// Dynamically estimate number of fields based on struct tags
+	estimatedFieldCount := 0
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if dbTag := field.Tag.Get("db"); dbTag != "" {
+			tagParts := strings.Split(dbTag, ",")
+			if tagParts[0] != "-" {
+				estimatedFieldCount++
+			}
+		}
+	}
+
+	fields := make([]string, 0, estimatedFieldCount)
+	allValues := make([]interface{}, 0, dataLen*estimatedFieldCount)
+	valueStrings := make([]string, 0, dataLen)
+
+	// Extract field names from the first row
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if dbTag := field.Tag.Get("db"); dbTag != "" {
+			tagParts := strings.Split(dbTag, ",")
+			fieldName := tagParts[0]
+			if fieldName != "-" {
+				fieldsMap[fieldName] = struct{}{}
+				fields = append(fields, fieldName)
+			}
+		}
+	}
+
+	for _, row := range data {
+		sValue = reflect.ValueOf(row)
+		if sValue.Kind() == reflect.Pointer {
+			sValue = sValue.Elem()
+		}
+
+		rowPlaceholders := make([]string, len(fields))
+		fieldValues := make(map[string]interface{})
+		fieldIsDefault := make(map[string]bool)
+
+		for i := 0; i < t.NumField(); i++ {
+			field := t.Field(i)
+			if dbTag := field.Tag.Get("db"); dbTag != "" {
+				tagParts := strings.Split(dbTag, ",")
+				fieldName := tagParts[0]
+
+				if fieldName == "-" {
+					continue
+				}
+
+				if _, exists := fieldsMap[fieldName]; exists {
+					value := sValue.Field(i).Interface()
+					omitempty := slices.Contains(tagParts, "omitempty")
+					useDefault := omitempty && types.IsEmpty(value)
+
+					if !useDefault && slices.Contains(tagParts, "marshaljson") && sValue.Field(i).Kind() == reflect.Struct {
+						jsonValue, err := json.Marshal(value)
+						if err != nil {
+							return "", nil, err
+						}
+						value = string(jsonValue)
+					}
+
+					fieldValues[fieldName] = value
+					fieldIsDefault[fieldName] = useDefault
+				}
+			}
+		}
+
+		rowValues := make([]interface{}, 0, len(fields))
+		for i, fieldName := range fields {
+			if fieldIsDefault[fieldName] {
+				rowPlaceholders[i] = "DEFAULT"
+			} else {
+				rowPlaceholders[i] = "?"
+				rowValues = append(rowValues, fieldValues[fieldName])
+			}
+		}
+
+		allValues = append(allValues, rowValues...)
+		valueStrings = append(valueStrings, "("+strings.Join(rowPlaceholders, ", ")+")")
+	}
+
+	queryBuilder.WriteString("INSERT INTO `")
+	queryBuilder.WriteString(tableName)
+	queryBuilder.WriteString("` (")
+	queryBuilder.WriteString(strings.Join(fields, ", "))
+	queryBuilder.WriteString(") VALUES ")
+	queryBuilder.WriteString(strings.Join(valueStrings, ", "))
+
+	return queryBuilder.String(), allValues, nil
+}
+
+// InsertFromStruct inserts a single record into the given table using field tags from a struct.
+// Supports "omitempty" and "marshaljson" in struct tags.
+//
+// Parameters:
+//   - dbctx: DB context.
+//   - tableName: target table.
+//   - data: struct with db-tagged fields.
+//
+// Returns:
+//   - rows affected
+//   - last insert ID
+//   - error if any.
+func InsertFromStruct(dbctx *DBContext, tableName string, data interface{}) (int64, int64, error) {
+	sValue := reflect.ValueOf(data)
+	if sValue.Kind() == reflect.Pointer {
+		sValue = sValue.Elem()
+	}
+
+	t := sValue.Type()
+	fields := make([]string, 0)
+	placeholders := make([]string, 0)
+	values := make([]interface{}, 0)
+
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+
+		if dbTag := field.Tag.Get("db"); dbTag != "" {
+			value := sValue.Field(i).Interface()
+			tagParts := strings.Split(dbTag, ",")
+			omitempty := slices.Contains(tagParts, "omitempty")
+
+			if !omitempty || !types.IsEmpty(value) {
+				if sValue.Kind() == reflect.Struct {
+					if slices.Contains(tagParts, "marshaljson") {
+						jsonValue, err := json.Marshal(value)
+
+						if err != nil {
+							return 0, 0, err
+						}
+						value = string(jsonValue)
+					}
+				}
+
+				fields = append(fields, tagParts[0])
+				placeholders = append(placeholders, "?")
+				values = append(values, value)
+			}
+		}
+	}
+
+	query := fmt.Sprintf("INSERT INTO `%s` (%s) VALUES (%s)",
+		tableName, strings.Join(fields, ", "), strings.Join(placeholders, ", "))
+
+	if dbctx == nil {
+		return 0, 0, fmt.Errorf("nil DB context provided, cannot execute the query")
+	}
+
+	result, execErr := dbctx.Exec(query, values...)
+	if execErr != nil {
+		return 0, 0, execErr
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		rowsAffected = 0
+	}
+
+	lastInsertId, err := result.LastInsertId()
+	if err != nil {
+		lastInsertId = 0
+	}
+
+	return rowsAffected, lastInsertId, nil
+}
+
+// InsertFromMap inserts a single record into the given table using a key-value map
+// of column names and their corresponding values.
+//
+// Parameters:
+//   - dbctx: DB context.
+//   - tableName: target table.
+//   - data: map of column names to values.
+//
+// Returns:
+//   - rows affected
+//   - last insert ID
+//   - error if any.
+func InsertFromMap(dbctx *DBContext, tableName string, data map[string]interface{}) (int64, int64, error) {
+	columns := []string{}
+	placeholders := []string{}
+	values := []interface{}{}
+
+	for column, value := range data {
+		columns = append(columns, column)
+		placeholders = append(placeholders, "?")
+		values = append(values, value)
+	}
+
+	query := fmt.Sprintf("INSERT INTO `%s` (%s) VALUES (%s)",
+		tableName, strings.Join(columns, ", "), strings.Join(placeholders, ", "))
+
+	if dbctx == nil {
+		return 0, 0, fmt.Errorf("nil DB context provided, cannot execute the query")
+	}
+
+	result, err := dbctx.Exec(query, values...)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		rowsAffected = 0
+	}
+
+	lastInsertId, err := result.LastInsertId()
+	if err != nil {
+		lastInsertId = 0
+	}
+
+	return rowsAffected, lastInsertId, nil
+}
+
+// UpdateFromMap updates rows in a table using a map of column-value pairs and a WHERE clause.
+//
+// Parameters:
+//   - dbctx: DB context.
+//   - tableName: name of the table.
+//   - data: map of columns to new values.
+//   - where: WHERE clause string (without "WHERE").
+//   - params: parameters for WHERE clause.
+//
+// Returns:
+//   - number of rows affected
+//   - error if any.
+func UpdateFromMap(dbctx *DBContext, tableName string, data map[string]interface{}, where string, params ...interface{}) (int64, error) {
+	setParts := []string{}
+	values := []interface{}{}
+
+	for column, value := range data {
+		setParts = append(setParts, fmt.Sprintf("%s = ?", column))
+		values = append(values, value)
+	}
+
+	values = append(values, params...)
+
+	query := fmt.Sprintf("UPDATE `%s` SET %s WHERE %s", tableName, strings.Join(setParts, ", "), where)
+
+	if dbctx == nil {
+		return 0, fmt.Errorf("nil DB context provided, cannot execute the query")
+	}
+
+	result, err := dbctx.Exec(query, values...)
+	if err != nil {
+		return 0, err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		rowsAffected = 0
+	}
+
+	return rowsAffected, nil
+}
+
+// DeleteByPrimaryKey deletes a single record by primary key.
+//
+// Parameters:
+//   - dbctx: DB context.
+//   - tableName: name of the table.
+//   - pkColumn: primary key column name.
+//   - pkValue: value of the primary key.
+//
+// Returns:
+//   - number of rows deleted
+//   - error if any.
+func DeleteByPrimaryKey(dbctx *DBContext, tableName, pkColumn string, pkValue interface{}) (int64, error) {
+	query := fmt.Sprintf("DELETE FROM %s WHERE %s = ?", tableName, pkColumn)
+
+	if dbctx == nil {
+		return 0, fmt.Errorf("nil DB context provided, cannot execute the query")
+	}
+
+	result, err := dbctx.Exec(query, pkValue)
+	if err != nil {
+		return 0, err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		rowsAffected = 0
+	}
+
+	return rowsAffected, nil
+}
+
+// SoftDeleteByPrimaryKey sets a soft-delete flag column to 1 for the given primary key.
+//
+// Parameters:
+//   - dbctx: DB context.
+//   - tableName: name of the table.
+//   - deleteCol: soft delete column name.
+//   - pkCol: primary key column name.
+//   - value: value of the primary key.
+//
+// Returns:
+//   - number of rows updated
+//   - error if any.
+func SoftDeleteByPrimaryKey(dbctx *DBContext, tableName, deleteCol, pkCol string, value interface{}) (int64, error) {
+	query := fmt.Sprintf("UPDATE `%s` SET `%s`=1 WHERE `%s` = ?", tableName, deleteCol, pkCol)
+
+	if dbctx == nil {
+		return 0, fmt.Errorf("nil DB context provided, cannot execute the query")
+	}
+
+	result, err := dbctx.Exec(query, value)
+	if err != nil {
+		return 0, err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		rowsAffected = 0
+	}
+
+	return rowsAffected, nil
+}
+
+// GetParameterizedInClause generates a named parameterized IN clause from a slice of values.
+// Returns the SQL-safe IN clause and map of parameter keys to values.
+//
+// Parameters:
+//   - columnName: name of the column for the IN clause.
+//   - columnValueArray: slice of values to include in the clause.
+//
+// Returns:
+//   - IN clause string
+//   - map of named parameters
+func GetParameterizedInClause[T any](columnName string, columnValueArray []T) (string, map[string]interface{}) {
+	inClauseParams := make(map[string]interface{})
+	var builder strings.Builder
+
+	for index, value := range columnValueArray {
+		key := fmt.Sprintf(":%s%d", columnName, index+1)
+		builder.WriteString(key)
+		builder.WriteString(",")
+		inClauseParams[key] = value
+	}
+
+	inClauseString := strings.TrimSuffix(builder.String(), ",")
+	return inClauseString, inClauseParams
+}
+
+// ConvertQueryAndNamedParams replaces named parameters in a query with positional placeholders (`?`)
+// and returns the ordered list of parameters as expected by sql.DB.
+//
+// Parameters:
+//   - query: SQL query with named parameters (e.g., :userId).
+//   - params: one or more maps of named parameter values.
+//
+// Returns:
+//   - modified query string
+//   - slice of parameter values in correct order
+func ConvertQueryAndNamedParams(query string, params ...map[string]interface{}) (string, []interface{}) {
+	allParams := make(map[string]interface{})
+	for _, oneParamDetails := range params {
+		for k, v := range oneParamDetails {
+			allParams[k] = v
+		}
+	}
+
+	// Find all named parameters in the query
+	re := regexp.MustCompile(`:[a-zA-Z0-9_]+`)
+	matches := re.FindAllString(query, -1)
+
+	paramValues := make([]interface{}, 0)
+
+	for _, match := range matches {
+		query = strings.Replace(query, match, "?", 1)
+		paramValues = append(paramValues, allParams[match])
+	}
+
+	return query, paramValues
+}
+
+// GenerateHashKey creates a unique hash key based on the provided query and its arguments.
+// It first extracts the keys from the argument map and sorts them. It then concatenates the
+// query string and the sorted arguments to generate a hash key. The key is then hashed using
+// SHA-1 and encoded to a base64 URL-safe string.
+//
+// Parameters:
+//   - query: The SQL query string.
+//   - args: A map of argument names to their values.
+//
+// Returns:
+//   - A base64 URL-encoded string representation of the SHA-1 hash.
+//   - An error if there's a failure during the hashing process.
+func HashKey(query string, args map[string]interface{}) (string, error) {
+	keys := make([]string, len(args))
+
+	i := 0
+	for k := range args {
+		keys[i] = k
+		i++
+	}
+
+	sort.Strings(keys)
+
+	argStr := ""
+
+	for i := range keys {
+		argStr += fmt.Sprintf("%s:%v|", keys[i], args[keys[i]])
+	}
+
+	hashKey := []byte(fmt.Sprintf("%s%s", query, argStr))
+
+	hasher := newHashWriter()
+	_, err := hasher.Write(hashKey)
+
+	if err != nil {
+		return "", err
+	}
+
+	return base64.URLEncoding.EncodeToString(hasher.Sum(nil)), nil
+}

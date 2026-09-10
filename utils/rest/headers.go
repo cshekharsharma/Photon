@@ -1,0 +1,50 @@
+package rest
+
+const (
+	// HTTP Headers
+	HeaderAccept                     string = "Accept"
+	HeaderAcceptEncoding             string = "Accept-Encoding"
+	HeaderAcceptLanguage             string = "Accept-Language"
+	HeaderCacheControl               string = "Cache-Control"
+	HeaderContentType                string = "Content-Type"
+	HeaderContentLength              string = "Content-Length"
+	HeaderContentEncoding            string = "Content-Encoding"
+	HeaderContentLanguage            string = "Content-Language"
+	HeaderContentDisposition         string = "Content-Disposition"
+	HeaderAuthorization              string = "Authorization"
+	HeaderUserAgent                  string = "User-Agent"
+	HeaderConnection                 string = "Connection"
+	HeaderPragma                     string = "Pragma"
+	HeaderExpires                    string = "Expires"
+	HeaderIfModifiedSince            string = "If-Modified-Since"
+	HeaderIfNoneMatch                string = "If-None-Match"
+	HeaderCookie                     string = "Cookie"
+	HeaderAccessControlExposeHeaders string = "Access-Control-Expose-Headers"
+
+	HeaderXForwardedFor       string = "X-Forwarded-For"
+	HeaderXRealIP             string = "X-Real-Ip"
+	HeaderXApiMinifier        string = "X-API-Minify"
+	HeaderXApiAuthToken       string = "X-Api-AuthToken"
+	HeaderXContentTypeOptions string = "X-Content-Type-Options"
+	HeaderXSignature          string = "X-Auth-Signature"
+
+	// Common Content-Type values
+	ContentTypeJSON              string = "application/json"
+	ContentTypeXML               string = "application/xml"
+	ContentTypeZIP               string = "application/zip"
+	ContentTypeFormURLEncoded    string = "application/x-www-form-urlencoded"
+	ContentTypeMultipartFormData string = "multipart/form-data"
+	ContentTypeMultipartMixed    string = "multipart/mixed"
+	ContentTypePlainText         string = "text/plain"
+	ContentTypeHTML              string = "text/html"
+	ContentTypeJavaScript        string = "application/javascript"
+	ContentTypeXJavaScript       string = "application/x-javascript"
+	ContentTypeTextJavaScript    string = "text/javascript"
+	ContentTypeCSS               string = "text/css"
+	ContentTypeJPEG              string = "image/jpeg"
+	ContentTypePNG               string = "image/png"
+	ContentTypeGIF               string = "image/gif"
+	ContentTypeOctetStream       string = "application/octet-stream"
+
+	XAPIMinifierValue string = "Y"
+)
