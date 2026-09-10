@@ -1,5 +1,11 @@
 # Photon
 
+[![CI](https://github.com/cshekharsharma/photon/actions/workflows/ci.yml/badge.svg)](https://github.com/cshekharsharma/photon/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cshekharsharma/photon.svg)](https://pkg.go.dev/github.com/cshekharsharma/photon)
+[![Go Report Card](https://goreportcard.com/badge/github.com/cshekharsharma/photon)](https://goreportcard.com/report/github.com/cshekharsharma/photon)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/cshekharsharma/photon)](https://github.com/cshekharsharma/photon/blob/master/go.mod)
+[![License](https://img.shields.io/github/license/cshekharsharma/photon)](./LICENSE)
+
 Photon is a lightweight Go service toolkit for building production backends without rebuilding the same infrastructure plumbing in every service.
 
 It gives teams a common foundation for HTTP and gRPC services, configuration, logging, telemetry, storage clients, cloud integrations, middleware, background workers, caching, and resilience utilities. The goal is not to hide Go behind a heavy framework. The goal is to keep normal Go code simple, observable, and consistent across services.

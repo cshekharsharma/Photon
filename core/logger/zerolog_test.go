@@ -2,7 +2,6 @@ package logger
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -425,59 +424,43 @@ func TestZerologMethods(t *testing.T) {
 }
 
 func TestZerologFatal(t *testing.T) {
-	if os.Getenv("TEST_FATAL") == "1" {
-		logger, err := newZerolog(&LoggerConfig{
-			Name:     "fatalLogger",
-			Provider: LoggerProviderZerolog,
-			Type:     LoggerTypeStdout,
-		})
-		if err != nil {
-			os.Exit(2)
-		}
-		logger.Fatal("fatal message")
-		return
+	previousFatalExitFunc := zerologLib.FatalExitFunc
+	zerologLib.FatalExitFunc = func() {
+		panic("fatal exit")
 	}
+	t.Cleanup(func() {
+		zerologLib.FatalExitFunc = previousFatalExitFunc
+	})
 
-	cmd := exec.Command(os.Args[0], "-test.run=TestZerologFatal")
-	cmd.Env = append(os.Environ(), "TEST_FATAL=1")
-	err := cmd.Run()
-	if err == nil {
-		t.Fatalf("expected non-zero exit code")
-	}
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		if exitErr.ExitCode() != 1 {
-			t.Fatalf("expected exit code 1, got %d", exitErr.ExitCode())
-		}
-	} else {
-		t.Fatalf("expected ExitError, got %T", err)
-	}
+	logger, err := newZerolog(&LoggerConfig{
+		Name:     "fatalLogger",
+		Provider: LoggerProviderZerolog,
+		Type:     LoggerTypeStdout,
+	})
+	assert.NoError(t, err)
+
+	assert.PanicsWithValue(t, "fatal exit", func() {
+		logger.Fatal("fatal message")
+	})
 }
 
 func TestZerologFatalWithFields(t *testing.T) {
-	if os.Getenv("TEST_FATAL_FIELDS") == "1" {
-		logger, err := newZerolog(&LoggerConfig{
-			Name:     "fatalFieldsLogger",
-			Provider: LoggerProviderZerolog,
-			Type:     LoggerTypeStdout,
-		})
-		if err != nil {
-			os.Exit(2)
-		}
-		logger.FatalWithFields(map[string]interface{}{"k": "v"}, "fatal with fields")
-		return
+	previousFatalExitFunc := zerologLib.FatalExitFunc
+	zerologLib.FatalExitFunc = func() {
+		panic("fatal exit")
 	}
+	t.Cleanup(func() {
+		zerologLib.FatalExitFunc = previousFatalExitFunc
+	})
 
-	cmd := exec.Command(os.Args[0], "-test.run=TestZerologFatalWithFields")
-	cmd.Env = append(os.Environ(), "TEST_FATAL_FIELDS=1")
-	err := cmd.Run()
-	if err == nil {
-		t.Fatalf("expected non-zero exit code")
-	}
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		if exitErr.ExitCode() != 1 {
-			t.Fatalf("expected exit code 1, got %d", exitErr.ExitCode())
-		}
-	} else {
-		t.Fatalf("expected ExitError, got %T", err)
-	}
+	logger, err := newZerolog(&LoggerConfig{
+		Name:     "fatalFieldsLogger",
+		Provider: LoggerProviderZerolog,
+		Type:     LoggerTypeStdout,
+	})
+	assert.NoError(t, err)
+
+	assert.PanicsWithValue(t, "fatal exit", func() {
+		logger.FatalWithFields(map[string]interface{}{"k": "v"}, "fatal with fields")
+	})
 }
