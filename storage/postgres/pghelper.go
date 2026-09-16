@@ -2,7 +2,7 @@ package postgres
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -67,7 +67,9 @@ func ExecuteReadQueryContext(ctx context.Context, dbctx *DBContext, queryInput R
 		return nil, err
 	}
 	if rows != nil {
-		defer closeSQLCloser(rows)
+		defer func() {
+			_ = rows.Close()
+		}()
 	}
 
 	cols, err := getReadColumnsHook(rows)
@@ -190,55 +192,15 @@ func generateMultiInsertQueriesFromStructArray[T any](tableName string, data []T
 		return "", nil, err
 	}
 
-	firstRow := reflect.ValueOf(data[0])
-	if firstRow.Kind() == reflect.Pointer {
-		firstRow = firstRow.Elem()
-	}
-	if firstRow.Kind() != reflect.Struct {
-		return "", nil, fmt.Errorf("expected struct input, got %s", firstRow.Kind())
+	t, err := structTypeOf(data[0])
+	if err != nil {
+		return "", nil, err
 	}
 
-	t := firstRow.Type()
-
-	estimatedFieldCount := 0
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		if dbTag := field.Tag.Get("db"); dbTag != "" {
-			tagParts := strings.Split(dbTag, ",")
-			if tagParts[0] != "-" {
-				estimatedFieldCount++
-			}
-		}
-	}
-
-	fieldsMap := make(map[string]struct{}, estimatedFieldCount)
-	fields := make([]string, 0, estimatedFieldCount)
-
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		dbTag := f.Tag.Get("db")
-		if dbTag == "" {
-			continue
-		}
-		tagParts := strings.Split(dbTag, ",")
-		name := tagParts[0]
-		if name == "-" {
-			continue
-		}
-		if _, ok := fieldsMap[name]; ok {
-			continue
-		}
-		fieldsMap[name] = struct{}{}
-		fields = append(fields, name)
-	}
-
-	quotedCols := make([]string, 0, len(fields))
-	for _, c := range fields {
-		qc, err := safeIdent(c)
-		if err != nil {
-			return "", nil, err
-		}
-		quotedCols = append(quotedCols, qc)
+	fields, estimatedFieldCount := dbFields(t)
+	quotedCols, err := quoteIdentifiers(fields)
+	if err != nil {
+		return "", nil, err
 	}
 
 	valueTuples := make([]string, 0, len(data))
@@ -246,60 +208,140 @@ func generateMultiInsertQueriesFromStructArray[T any](tableName string, data []T
 	argPos := 1
 
 	for _, row := range data {
-		sv := reflect.ValueOf(row)
-		if sv.Kind() == reflect.Pointer {
-			sv = sv.Elem()
-		}
-		if sv.Kind() != reflect.Struct {
-			return "", nil, fmt.Errorf("expected struct input, got %s", sv.Kind())
+		fieldValues, fieldIsDefault, err := multiInsertRowValues(row, t, len(fields))
+		if err != nil {
+			return "", nil, err
 		}
 
-		fieldValues := make(map[string]any, len(fields))
-		fieldIsDefault := make(map[string]bool, len(fields))
-
-		for i := 0; i < t.NumField(); i++ {
-			f := t.Field(i)
-			dbTag := f.Tag.Get("db")
-			if dbTag == "" {
-				continue
-			}
-			tagParts := strings.Split(dbTag, ",")
-			name := tagParts[0]
-			if name == "-" {
-				continue
-			}
-			val := sv.Field(i).Interface()
-			omitempty := slices.Contains(tagParts, "omitempty")
-			useDefault := omitempty && types.IsEmpty(val)
-
-			if !useDefault && slices.Contains(tagParts, "marshaljson") && sv.Field(i).Kind() == reflect.Struct {
-				jv, err := json.Marshal(val)
-				if err != nil {
-					return "", nil, err
-				}
-				val = string(jv)
-			}
-
-			fieldValues[name] = val
-			fieldIsDefault[name] = useDefault
-		}
-
-		placeholders := make([]string, 0, len(fields))
-		for _, name := range fields {
-			if fieldIsDefault[name] {
-				placeholders = append(placeholders, "DEFAULT")
-				continue
-			}
-			placeholders = append(placeholders, "$"+strconv.Itoa(argPos))
-			argPos++
-			allValues = append(allValues, fieldValues[name])
-		}
-
-		valueTuples = append(valueTuples, "("+strings.Join(placeholders, ", ")+")")
+		tuple, values := multiInsertPlaceholders(fields, fieldValues, fieldIsDefault, &argPos)
+		valueTuples = append(valueTuples, tuple)
+		allValues = append(allValues, values...)
 	}
 
 	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s", tbl, strings.Join(quotedCols, ", "), strings.Join(valueTuples, ", "))
 	return query, allValues, nil
+}
+
+func structTypeOf(row any) (reflect.Type, error) {
+	v := reflect.ValueOf(row)
+	if v.Kind() == reflect.Pointer {
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("expected struct input, got %s", v.Kind())
+	}
+	return v.Type(), nil
+}
+
+func dbFields(t reflect.Type) ([]string, int) {
+	estimatedFieldCount := 0
+	fieldsMap := make(map[string]struct{}, t.NumField())
+	fields := make([]string, 0, t.NumField())
+
+	for i := 0; i < t.NumField(); i++ {
+		name, ok := dbTagName(t.Field(i))
+		if !ok {
+			continue
+		}
+		estimatedFieldCount++
+		if _, exists := fieldsMap[name]; exists {
+			continue
+		}
+		fieldsMap[name] = struct{}{}
+		fields = append(fields, name)
+	}
+
+	return fields, estimatedFieldCount
+}
+
+func dbTagName(field reflect.StructField) (string, bool) {
+	dbTag := field.Tag.Get("db")
+	if dbTag == "" {
+		return "", false
+	}
+	name := strings.Split(dbTag, ",")[0]
+	return name, name != "-"
+}
+
+func quoteIdentifiers(fields []string) ([]string, error) {
+	quotedCols := make([]string, 0, len(fields))
+	for _, c := range fields {
+		qc, err := safeIdent(c)
+		if err != nil {
+			return nil, err
+		}
+		quotedCols = append(quotedCols, qc)
+	}
+	return quotedCols, nil
+}
+
+func multiInsertRowValues(row any, t reflect.Type, fieldCount int) (map[string]any, map[string]bool, error) {
+	sv := reflect.ValueOf(row)
+	if sv.Kind() == reflect.Pointer {
+		sv = sv.Elem()
+	}
+	if sv.Kind() != reflect.Struct {
+		return nil, nil, fmt.Errorf("expected struct input, got %s", sv.Kind())
+	}
+
+	fieldValues := make(map[string]any, fieldCount)
+	fieldIsDefault := make(map[string]bool, fieldCount)
+	for i := 0; i < t.NumField(); i++ {
+		if err := setMultiInsertFieldValue(sv, t.Field(i), i, fieldValues, fieldIsDefault); err != nil {
+			return nil, nil, err
+		}
+	}
+	return fieldValues, fieldIsDefault, nil
+}
+
+func setMultiInsertFieldValue(
+	sv reflect.Value,
+	field reflect.StructField,
+	index int,
+	fieldValues map[string]any,
+	fieldIsDefault map[string]bool,
+) error {
+	dbTag := field.Tag.Get("db")
+	if dbTag == "" {
+		return nil
+	}
+
+	tagParts := strings.Split(dbTag, ",")
+	name := tagParts[0]
+	if name == "-" {
+		return nil
+	}
+
+	value := sv.Field(index).Interface()
+	useDefault := slices.Contains(tagParts, "omitempty") && types.IsEmpty(value)
+	if !useDefault && slices.Contains(tagParts, "marshaljson") && sv.Field(index).Kind() == reflect.Struct {
+		jsonValue, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		value = string(jsonValue)
+	}
+
+	fieldValues[name] = value
+	fieldIsDefault[name] = useDefault
+	return nil
+}
+
+func multiInsertPlaceholders(fields []string, fieldValues map[string]any, fieldIsDefault map[string]bool, argPos *int) (string, []any) {
+	placeholders := make([]string, 0, len(fields))
+	values := make([]any, 0, len(fields))
+
+	for _, name := range fields {
+		if fieldIsDefault[name] {
+			placeholders = append(placeholders, "DEFAULT")
+			continue
+		}
+		placeholders = append(placeholders, "$"+strconv.Itoa(*argPos))
+		(*argPos)++
+		values = append(values, fieldValues[name])
+	}
+
+	return "(" + strings.Join(placeholders, ", ") + ")", values
 }
 
 // InsertFromStruct inserts one record into a table based on struct db tags.
@@ -599,128 +641,161 @@ func GetParameterizedInClause[T any](columnName string, columnValueArray []T) (s
 // - Named tokens must be [A-Za-z0-9_]+ and be prefixed by single ':'
 // - The params maps must use keys like ":name" (same as your mysql helper)
 func ConvertQueryAndNamedParams(query string, params ...map[string]any) (string, []any) {
+	converter := newNamedParamConverter(query, mergeNamedParams(params...))
+	converter.convert()
+	return converter.out.String(), converter.ordered
+}
+
+type namedParamConverter struct {
+	query         string
+	params        map[string]any
+	out           strings.Builder
+	ordered       []any
+	seen          map[string]int
+	argPos        int
+	index         int
+	inSingleQuote bool
+	inDollarQuote bool
+	dollarTag     string
+}
+
+func newNamedParamConverter(query string, params map[string]any) *namedParamConverter {
+	converter := &namedParamConverter{
+		query:   query,
+		params:  params,
+		ordered: make([]any, 0, 8),
+		seen:    make(map[string]int, 16),
+		argPos:  1,
+	}
+	converter.out.Grow(len(query) + 16)
+	return converter
+}
+
+func mergeNamedParams(params ...map[string]any) map[string]any {
 	allParams := make(map[string]any)
 	for _, mp := range params {
 		for k, v := range mp {
 			allParams[k] = v
 		}
 	}
+	return allParams
+}
 
-	var out strings.Builder
-	out.Grow(len(query) + 16)
-
-	ordered := make([]any, 0, 8)
-	seen := make(map[string]int, 16) // ":id" -> position
-
-	argPos := 1
-
-	// states
-	inSingleQuote := false
-	inDollarQuote := false
-	dollarTag := "" // includes the $...$ tag (e.g. "$$", "$tag$")
-	i := 0
-
-	for i < len(query) {
-		ch := query[i]
-
-		// Handle dollar-quoted strings start/end
-		if !inSingleQuote {
-			if !inDollarQuote && ch == '$' {
-				tag, ok := parseDollarTag(query[i:])
-				if ok {
-					inDollarQuote = true
-					dollarTag = tag
-					out.WriteString(tag)
-					i += len(tag)
-					continue
-				}
-			} else if inDollarQuote && ch == '$' && dollarTag != "" && strings.HasPrefix(query[i:], dollarTag) {
-				// end
-				inDollarQuote = false
-				out.WriteString(dollarTag)
-				i += len(dollarTag)
-				dollarTag = ""
-				continue
-			}
-		}
-
-		// Handle single-quoted strings start/end (ignore escaped '' inside)
-		if !inDollarQuote && ch == '\'' {
-			out.WriteByte(ch)
-			if inSingleQuote {
-				// check escaped ''
-				if i+1 < len(query) && query[i+1] == '\'' {
-					// still in string
-					out.WriteByte(query[i+1])
-					i += 2
-					continue
-				}
-				inSingleQuote = false
-				i++
-				continue
-			}
-			inSingleQuote = true
-			i++
+func (c *namedParamConverter) convert() {
+	for c.index < len(c.query) {
+		if c.handleDollarQuote() || c.handleSingleQuote() || c.copyQuotedByte() || c.handleNamedParam() {
 			continue
 		}
+		c.out.WriteByte(c.query[c.index])
+		c.index++
+	}
+}
 
-		// If inside any quoted region, copy verbatim
-		if inSingleQuote || inDollarQuote {
-			out.WriteByte(ch)
-			i++
-			continue
-		}
-
-		// Named param detection
-		if ch == ':' {
-			// Skip Postgres cast "::"
-			if i+1 < len(query) && query[i+1] == ':' {
-				out.WriteString("::")
-				i += 2
-				continue
-			}
-
-			// parse token name
-			j := i + 1
-			for j < len(query) {
-				c := query[j]
-				if (c >= 'a' && c <= 'z') ||
-					(c >= 'A' && c <= 'Z') ||
-					(c >= '0' && c <= '9') ||
-					c == '_' {
-					j++
-					continue
-				}
-				break
-			}
-
-			// If no name, treat ":" literally
-			if j == i+1 {
-				out.WriteByte(':')
-				i++
-				continue
-			}
-
-			token := query[i:j] // includes ':'
-			if pos, ok := seen[token]; ok {
-				out.WriteString("$" + strconv.Itoa(pos))
-				i = j
-				continue
-			}
-
-			seen[token] = argPos
-			out.WriteString("$" + strconv.Itoa(argPos))
-			ordered = append(ordered, allParams[token])
-			argPos++
-			i = j
-			continue
-		}
-
-		out.WriteByte(ch)
-		i++
+func (c *namedParamConverter) handleDollarQuote() bool {
+	if c.inSingleQuote || c.query[c.index] != '$' {
+		return false
+	}
+	if c.inDollarQuote && c.dollarTag != "" && strings.HasPrefix(c.query[c.index:], c.dollarTag) {
+		c.inDollarQuote = false
+		c.out.WriteString(c.dollarTag)
+		c.index += len(c.dollarTag)
+		c.dollarTag = ""
+		return true
+	}
+	if c.inDollarQuote {
+		return false
 	}
 
-	return out.String(), ordered
+	tag, ok := parseDollarTag(c.query[c.index:])
+	if !ok {
+		return false
+	}
+	c.inDollarQuote = true
+	c.dollarTag = tag
+	c.out.WriteString(tag)
+	c.index += len(tag)
+	return true
+}
+
+func (c *namedParamConverter) handleSingleQuote() bool {
+	if c.inDollarQuote || c.query[c.index] != '\'' {
+		return false
+	}
+
+	c.out.WriteByte(c.query[c.index])
+	if c.inSingleQuote && c.index+1 < len(c.query) && c.query[c.index+1] == '\'' {
+		c.out.WriteByte(c.query[c.index+1])
+		c.index += 2
+		return true
+	}
+	c.inSingleQuote = !c.inSingleQuote
+	c.index++
+	return true
+}
+
+func (c *namedParamConverter) copyQuotedByte() bool {
+	if !c.inSingleQuote && !c.inDollarQuote {
+		return false
+	}
+	c.out.WriteByte(c.query[c.index])
+	c.index++
+	return true
+}
+
+func (c *namedParamConverter) handleNamedParam() bool {
+	if c.query[c.index] != ':' {
+		return false
+	}
+	if c.copyPostgresCast() {
+		return true
+	}
+
+	end := namedParamEnd(c.query, c.index+1)
+	if end == c.index+1 {
+		c.out.WriteByte(':')
+		c.index++
+		return true
+	}
+
+	c.writeNamedParam(c.query[c.index:end])
+	c.index = end
+	return true
+}
+
+func (c *namedParamConverter) copyPostgresCast() bool {
+	if c.index+1 >= len(c.query) || c.query[c.index+1] != ':' {
+		return false
+	}
+	c.out.WriteString("::")
+	c.index += 2
+	return true
+}
+
+func (c *namedParamConverter) writeNamedParam(token string) {
+	if pos, ok := c.seen[token]; ok {
+		c.out.WriteString("$" + strconv.Itoa(pos))
+		return
+	}
+
+	c.seen[token] = c.argPos
+	c.out.WriteString("$" + strconv.Itoa(c.argPos))
+	c.ordered = append(c.ordered, c.params[token])
+	c.argPos++
+}
+
+func namedParamEnd(query string, start int) int {
+	i := start
+	for i < len(query) && isNamedParamChar(query[i]) {
+		i++
+	}
+	return i
+}
+
+func isNamedParamChar(ch byte) bool {
+	return (ch >= 'a' && ch <= 'z') ||
+		(ch >= 'A' && ch <= 'Z') ||
+		(ch >= '0' && ch <= '9') ||
+		ch == '_'
 }
 
 // HashKey creates a deterministic hash for query+args map (same intent as your mysql helper).
@@ -742,7 +817,7 @@ func HashKey(query string, args map[string]any) (string, error) {
 		b.WriteString("|")
 	}
 
-	sum := sha1.Sum([]byte(b.String()))
+	sum := sha256.Sum256([]byte(b.String()))
 	return base64.URLEncoding.EncodeToString(sum[:]), nil
 }
 

@@ -253,6 +253,38 @@ func TestPopulateStructFromMap(t *testing.T) {
 	}
 }
 
+func TestSetNestedStructField_NonStringInterfaceMap(t *testing.T) {
+	type target struct {
+		Nested SubStruct
+	}
+
+	var dst target
+	field := reflect.ValueOf(&dst).Elem().FieldByName("Nested")
+	handled, err := setNestedStructField(field, field.Type(), reflect.ValueOf(map[int]interface{}{1: "x"}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if handled {
+		t.Fatal("expected non map[string]interface{} value to be unhandled")
+	}
+}
+
+func TestSetStringField_UnsupportedStruct(t *testing.T) {
+	field := reflect.New(reflect.TypeOf(SubStruct{})).Elem()
+	err := setStringField(field, field.Type(), "not-a-struct")
+	if err == nil {
+		t.Fatal("expected unsupported struct conversion error")
+	}
+}
+
+func TestSetStringField_UnsupportedKind(t *testing.T) {
+	field := reflect.New(reflect.TypeOf([]string{})).Elem()
+	err := setStringField(field, field.Type(), "not-a-slice")
+	if err == nil {
+		t.Fatal("expected unsupported kind conversion error")
+	}
+}
+
 func TestStructToMap(t *testing.T) {
 	now := time.Now()
 	input := SampleStruct{

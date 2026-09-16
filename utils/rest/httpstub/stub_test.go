@@ -25,6 +25,18 @@ func TestIsStubbingEnabled(t *testing.T) {
 	}
 }
 
+func TestCryptoFloat64_ReadError(t *testing.T) {
+	originalRead := cryptoRandRead
+	cryptoRandRead = func([]byte) (int, error) {
+		return 0, errors.New("entropy unavailable")
+	}
+	t.Cleanup(func() { cryptoRandRead = originalRead })
+
+	if got := cryptoFloat64(); got != 1 {
+		t.Fatalf("expected fallback value 1, got %v", got)
+	}
+}
+
 func TestAddStub(t *testing.T) {
 	ClearAllStubs()
 

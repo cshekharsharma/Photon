@@ -92,7 +92,7 @@ func configureFileLogger(config *LoggerConfig) (io.Writer, error) {
 	}
 
 	if _, err := os.Stat(config.BaseDir); os.IsNotExist(err) {
-		err := os.Mkdir(config.BaseDir, 0777)
+		err := os.Mkdir(config.BaseDir, 0750)
 		if err != nil {
 			return nil, err
 		}
@@ -101,7 +101,7 @@ func configureFileLogger(config *LoggerConfig) (io.Writer, error) {
 	filename := fmt.Sprintf("%s.log", strings.ToLower(config.Name))
 	fullpath := filepath.Join(config.BaseDir, filename)
 
-	file, err := os.OpenFile(fullpath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0777)
+	file, err := os.OpenFile(fullpath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600) // #nosec G304 -- path is built from caller configured log directory and logger name.
 	if err != nil {
 		return nil, err
 	}

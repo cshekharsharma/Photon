@@ -468,34 +468,23 @@ func TestMakeHTTPRequest_StubCloseError(t *testing.T) {
 	httpstub.InitStubConfig(true)
 	httpstub.ClearAllStubs()
 
-	entry := &httpstub.StubEntry{
-		ID:               "stub-close-error",
-		Endpoint:         "/ignored",
-		ResponseCode:     http.StatusOK,
-		PositiveResponse: `{"ok":true}`,
-		Probability:      1.0,
+	oldCallStub := callStubFn
+	callStubFn = func(context.Context, string) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     http.StatusText(http.StatusOK),
+			Body:       closeErrReadCloser{Reader: strings.NewReader(`{"ok":true}`)},
+			Header:     make(http.Header),
+		}, nil
 	}
-	_, addErr := httpstub.AddStub(entry)
-	assert.NoError(t, addErr)
-
-	oldReadAll := readAllFn
-	readAllFn = func(io.Reader) ([]byte, error) {
-		return []byte(`{"ok":true}`), nil
-	}
-	defer func() { readAllFn = oldReadAll }()
-
-	oldCloseBody := closeBodyFn
-	closeBodyFn = func(io.Closer) error {
-		return errors.New("stub close error")
-	}
-	defer func() { closeBodyFn = oldCloseBody }()
+	defer func() { callStubFn = oldCallStub }()
 
 	_, err := MakeHTTPRequest(context.Background(), &mockHttpClient{}, RequestEntity{
 		Url:    "http://example.com",
 		Method: http.MethodGet,
 		StubID: "stub-close-error",
 	})
-	if err == nil || !strings.Contains(err.Error(), "stub close error") {
+	if err == nil || !strings.Contains(err.Error(), "close failed") {
 		t.Fatalf("expected stub close error, got %v", err)
 	}
 }

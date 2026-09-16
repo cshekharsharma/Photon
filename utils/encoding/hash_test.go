@@ -1,7 +1,6 @@
 package encoding
 
 import (
-	"crypto/md5"
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/hex"
@@ -10,14 +9,6 @@ import (
 	"hash/fnv"
 	"testing"
 )
-
-func TestHashMD5(t *testing.T) {
-	input := []byte("hello")
-	expected := md5.Sum(input)
-	if out := HashMD5(input); out != hex.EncodeToString(expected[:]) {
-		t.Errorf("expected %q, got %q", hex.EncodeToString(expected[:]), out)
-	}
-}
 
 func TestHashSHA256(t *testing.T) {
 	input := []byte("hello")

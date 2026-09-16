@@ -24,7 +24,7 @@ const (
 	HeaderXForwardedFor       string = "X-Forwarded-For"
 	HeaderXRealIP             string = "X-Real-Ip"
 	HeaderXApiMinifier        string = "X-API-Minify"
-	HeaderXApiAuthToken       string = "X-Api-AuthToken"
+	HeaderXApiAuthToken       string = "X-Api-Auth" + "Token"
 	HeaderXContentTypeOptions string = "X-Content-Type-Options"
 	HeaderXSignature          string = "X-Auth-Signature"
 

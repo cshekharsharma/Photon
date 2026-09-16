@@ -2,7 +2,7 @@ package middleware
 
 import "net/http"
 
-// Concious call to build over net/http package to support public middleware
+// Conscious call to build over net/http package to support public middleware
 // packages built over and above net/http package
 type MiddlewareFn func(http.HandlerFunc) http.HandlerFunc
 

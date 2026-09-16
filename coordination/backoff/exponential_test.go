@@ -129,10 +129,18 @@ func TestNewBackoff(t *testing.T) {
 
 func TestReset(t *testing.T) {
 	b := NewBackoff()
-	oldRng := b.rng
 	b.Reset()
-	if b.rng == oldRng {
-		t.Error("expected rng to be reset")
+}
+
+func TestCryptoFloat64_ReadError(t *testing.T) {
+	originalRead := cryptoRandRead
+	cryptoRandRead = func([]byte) (int, error) {
+		return 0, errors.New("entropy unavailable")
+	}
+	t.Cleanup(func() { cryptoRandRead = originalRead })
+
+	if got := cryptoFloat64(); got != 1 {
+		t.Fatalf("expected fallback value 1, got %v", got)
 	}
 }
 

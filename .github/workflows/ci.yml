@@ -34,39 +34,12 @@ jobs:
       - name: Race tests
         run: go test -race ./cloud ./cloud/providers ./cloud/service/aws ./core/logger ./telemetry ./coordination/network/discovery ./coordination/network/watcher ./middleware ./server/grpc/server ./server/http ./storage/aerospike ./storage/memcached ./storage/elasticsearch ./storage/mongo ./storage/mysql ./storage/redis ./utils/rest ./notifier/notifyrclient ./workers
 
-      - name: Critical package coverage
+      - name: Package coverage
         run: |
           set -euo pipefail
-          packages="
-          ./caching
-          ./cloud
-          ./cloud/providers
-          ./cloud/service/aws
-          ./coordination/network/discovery
-          ./coordination/network/watcher
-          ./core/config
-          ./core/features
-          ./core/logger
-          ./core/logger/writers
-          ./middleware
-          ./notifier/notifyrclient
-          ./storage/aerospike
-          ./storage/elasticsearch
-          ./storage/memcached
-          ./storage/mongo
-          ./storage/mysql
-          ./storage/redis
-          ./telemetry
-          ./telemetry/logger
-          ./telemetry/meter
-          ./utils/rest
-          "
-          for pkg in $packages; do
-            profile="$(mktemp)"
-            go test -covermode=atomic -coverprofile="$profile" "$pkg"
-            total=$(go tool cover -func="$profile" | awk '/^total:/ {print substr($3, 1, length($3)-1)}')
-            awk -v total="$total" -v pkg="$pkg" 'BEGIN { if (total + 0 < 100) { printf "%s coverage is %s%%, want 100.0%%\n", pkg, total; exit 1 } else { printf "%s coverage %s%%\n", pkg, total } }'
-          done
+          go run tools/gotest_exec.go --skip-mocks
+          go run tools/gotest_coverage.go
+          go tool cover -func=coverage.txt | awk '$3 != "100.0%" { print; failed = 1 } END { exit failed }'
 
   lint:
     name: Lint
@@ -81,22 +54,14 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
-      - name: Go fmt
-        run: test -z "$(gofmt -l .)"
+      - name: Install lint tools
+        run: make tools
 
-      - name: Go vet
-        run: go vet ./...
-
-      - name: Install staticcheck
-        run: go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
-
-      - name: Staticcheck
-        run: $(go env GOPATH)/bin/staticcheck ./...
-
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v7
-        with:
-          version: v2.13.2
+      - name: Lint
+        run: |
+          set -euo pipefail
+          make lint
+          git diff --exit-code
 
   security:
     name: Security

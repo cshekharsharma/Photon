@@ -52,5 +52,5 @@ Before tagging:
 - Update `CHANGELOG.md`.
 - Confirm `README.md` and `docs/examples` match the public API.
 - Confirm any breaking change is called out clearly.
-- Confirm critical package coverage gates remain at `100.0%`.
+- Confirm package coverage gates remain at `100.0%`.
 - Tag with semantic versioning.

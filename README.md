@@ -1,8 +1,9 @@
 # Photon
 
 [![CI](https://github.com/cshekharsharma/photon/actions/workflows/ci.yml/badge.svg)](https://github.com/cshekharsharma/photon/actions/workflows/ci.yml)
+[![Coverage Gate](https://img.shields.io/badge/coverage%20gate-100%25-brightgreen)](https://github.com/cshekharsharma/photon/actions/workflows/ci.yml)
+[![Code Quality](https://img.shields.io/badge/code%20quality-golangci--lint-blue)](./.golangci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/cshekharsharma/photon.svg)](https://pkg.go.dev/github.com/cshekharsharma/photon)
-[![Go Report Card](https://goreportcard.com/badge/github.com/cshekharsharma/photon)](https://goreportcard.com/report/github.com/cshekharsharma/photon)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/cshekharsharma/photon)](https://github.com/cshekharsharma/photon/blob/master/go.mod)
 [![License](https://img.shields.io/github/license/cshekharsharma/photon)](./LICENSE)
 

@@ -19,7 +19,7 @@ type WorkerInterface interface {
 	// of running worker (go-routine)
 	SetWorkerId(id string)
 
-	// Get errors that have occured during the execution
+	// Get errors that have occurred during the execution
 	// of current execution cycle of the worker loop.
 	// Usually these errors are caught and recovered through
 	// panic-recover workflow.
@@ -33,7 +33,7 @@ type WorkerInterface interface {
 	// This method is called from outside by worker overseer and
 	// is responsible for processing all the queued messages through
 	// an always running loop. In case of any exception/error or panic
-	// sitation, this mehtod should be able to recover from that and
+	// situation, this method should be able to recover from that and
 	// emit relevant message to the callee, so while current running
 	// instance of worker goes down, but the callee is able to respawn
 	// another similar instance to carry on the queue processing flow.

@@ -15,7 +15,7 @@ func LoadTLSCredentials(certFile, keyFile, caFile string) (*tls.Config, error) {
 		return nil, fmt.Errorf("failed to load client cert/key: %w", err)
 	}
 
-	caCert, err := os.ReadFile(caFile)
+	caCert, err := os.ReadFile(caFile) // #nosec G304 -- caller intentionally supplies the CA bundle path.
 	if err != nil {
 		return nil, fmt.Errorf("failed to read CA cert: %w", err)
 	}

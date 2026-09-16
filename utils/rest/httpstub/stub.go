@@ -22,10 +22,11 @@ package httpstub
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
-	"math/rand/v2"
 	"net/http"
 	"sync"
 	"time"
@@ -74,6 +75,8 @@ var (
 	enableStubs bool                  = true
 	httpStubs   map[string]*StubEntry = make(map[string]*StubEntry)
 )
+
+var cryptoRandRead = cryptorand.Read
 
 // InitStubConfig initializes or resets the stub configuration. It clears all existing stubs and sets
 // whether stubbing is enabled or disabled. If enabled is false, CallStub will return nil responses.
@@ -226,7 +229,7 @@ func CallStub(ctx context.Context, id string) (*http.Response, error) {
 	stub.HitCount++
 
 	// Decide response type based on Probability
-	usePositive := rand.Float64() <= stub.Probability
+	usePositive := cryptoFloat64() <= stub.Probability
 	respCode := stub.ResponseCode
 	respBody := stub.PositiveResponse
 
@@ -260,6 +263,14 @@ func CallStub(ctx context.Context, id string) (*http.Response, error) {
 	resp.Status = http.StatusText(respCode)
 
 	return resp, nil
+}
+
+func cryptoFloat64() float64 {
+	var buf [8]byte
+	if _, err := cryptoRandRead(buf[:]); err != nil {
+		return 1
+	}
+	return float64(binary.BigEndian.Uint64(buf[:])) / float64(^uint64(0))
 }
 
 // addDefaultValues fills in fields of StubEntry with defaults if they are zero-valued.

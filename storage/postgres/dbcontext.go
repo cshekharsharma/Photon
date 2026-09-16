@@ -107,10 +107,10 @@ func (ctx *DBContext) PrepareContext(c context.Context, query string) (*sql.Stmt
 
 	if ctx.PrepareFn != nil {
 		// TODO(otel): start span "postgres.prepare"
-		return ctx.PrepareFn(c, query)
+		return ctx.PrepareFn(c, query) //nolint:sqlclosecheck // caller owns the returned statement.
 	}
 
-	return ctx.prepareContext(c, query)
+	return ctx.prepareContext(c, query) //nolint:sqlclosecheck // caller owns the returned statement.
 }
 
 // QueryContext executes a SQL query that returns rows.
@@ -128,10 +128,10 @@ func (ctx *DBContext) QueryContext(c context.Context, query string, args ...any)
 
 	if ctx.QueryFn != nil {
 		// TODO(otel): start span "postgres.query"
-		return ctx.QueryFn(c, query, args...)
+		return ctx.QueryFn(c, query, args...) //nolint:sqlclosecheck // caller owns the returned rows.
 	}
 
-	return ctx.queryContext(c, query, args...)
+	return ctx.queryContext(c, query, args...) //nolint:sqlclosecheck // caller owns the returned rows.
 }
 
 // --- internals ---

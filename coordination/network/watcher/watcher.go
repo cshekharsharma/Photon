@@ -2,7 +2,7 @@ package watcher
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 )
@@ -22,6 +22,6 @@ func (a *AwsAppConfigWatcher) generateUniqueID() string {
 		a.watcherOptions.ContentScope,
 		a.watcherOptions.ClientID)
 
-	hash := sha1.Sum([]byte(raw))
+	hash := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(hash[:])
 }

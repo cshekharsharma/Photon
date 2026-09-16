@@ -1,6 +1,7 @@
 package types
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -170,6 +171,18 @@ func TestGetRandomString(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGetRandomString_ReadError(t *testing.T) {
+	originalRead := cryptoRandRead
+	cryptoRandRead = func([]byte) (int, error) {
+		return 0, errors.New("entropy unavailable")
+	}
+	t.Cleanup(func() { cryptoRandRead = originalRead })
+
+	if result := GetRandomString(10); result != "" {
+		t.Fatalf("expected empty string on random read failure, got %q", result)
 	}
 }
 

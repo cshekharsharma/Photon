@@ -1018,6 +1018,51 @@ func TestConvertQueryAndNamedParams_EscapedSingleQuote(t *testing.T) {
 	}
 }
 
+func TestConvertQueryAndNamedParams_DollarQuoteWithStrayDollar(t *testing.T) {
+	q := "SELECT $tag$body $ still :ignored$tag$ FROM t WHERE id=:id"
+	outQ, args := ConvertQueryAndNamedParams(q, map[string]any{":id": 11})
+
+	if !strings.Contains(outQ, "$tag$body $ still :ignored$tag$") {
+		t.Fatalf("expected dollar quoted body to remain unchanged: %s", outQ)
+	}
+	if !strings.Contains(outQ, "id=$1") {
+		t.Fatalf("expected named param to be converted: %s", outQ)
+	}
+	if len(args) != 1 || args[0].(int) != 11 {
+		t.Fatalf("unexpected args: %#v", args)
+	}
+}
+
+func TestConvertQueryAndNamedParams_DollarInsideSingleQuote(t *testing.T) {
+	q := "SELECT '$not_dollar_tag :ignored' FROM t WHERE id=:id"
+	outQ, args := ConvertQueryAndNamedParams(q, map[string]any{":id": 12})
+
+	if !strings.Contains(outQ, "'$not_dollar_tag :ignored'") {
+		t.Fatalf("expected single-quoted dollar text to remain unchanged: %s", outQ)
+	}
+	if !strings.Contains(outQ, "id=$1") {
+		t.Fatalf("expected named param to be converted: %s", outQ)
+	}
+	if len(args) != 1 || args[0].(int) != 12 {
+		t.Fatalf("unexpected args: %#v", args)
+	}
+}
+
+func TestConvertQueryAndNamedParams_InvalidDollarTag(t *testing.T) {
+	q := "SELECT price$invalid FROM t WHERE id=:id"
+	outQ, args := ConvertQueryAndNamedParams(q, map[string]any{":id": 13})
+
+	if !strings.Contains(outQ, "price$invalid") {
+		t.Fatalf("expected invalid dollar tag text to remain unchanged: %s", outQ)
+	}
+	if !strings.Contains(outQ, "id=$1") {
+		t.Fatalf("expected named param to be converted: %s", outQ)
+	}
+	if len(args) != 1 || args[0].(int) != 13 {
+		t.Fatalf("unexpected args: %#v", args)
+	}
+}
+
 func TestParseDollarTag_Unterminated(t *testing.T) {
 	if _, ok := parseDollarTag("$unterminated"); ok {
 		t.Fatalf("expected false for unterminated dollar tag")

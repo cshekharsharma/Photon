@@ -112,7 +112,7 @@ func TestBloomFilterSerialization(t *testing.T) {
 
 	for i := 0; i < 100; i++ {
 		e1 := fmt.Sprintf("test%d", i)
-		e2 := fmt.Sprintf("nonexistant1-%d", i)
+		e2 := fmt.Sprintf("nonexistent1-%d", i)
 
 		if !newBF.Exists(e1) {
 			t.Errorf("expected '%s' to exist after deserialization", e1)

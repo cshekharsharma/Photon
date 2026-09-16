@@ -66,51 +66,13 @@ func convertField(field reflect.Value, fieldType reflect.StructField, fieldValue
 
 	if fieldKind == reflect.Pointer {
 		if field.IsNil() {
-			field.Set(reflect.New(fieldType.Type.Elem()))
+			field.Set(reflect.New(field.Type().Elem()))
 		}
 		return convertField(field.Elem(), fieldType, fieldValue)
 	}
 
 	if fieldKind == reflect.Map {
-		mapType := field.Type()
-		mapKeyType := mapType.Key()
-		mapElemType := mapType.Elem()
-
-		rawData, ok := fieldValue.(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("expected map for field, but got %T", fieldValue)
-		}
-
-		convertedMap := reflect.MakeMap(mapType)
-		for key, value := range rawData {
-			mapKey := reflect.ValueOf(key).Convert(mapKeyType)
-			mapValue := reflect.New(mapElemType).Elem()
-
-			// Handle cases where the map element type is interface{}
-			if mapElemType.Kind() == reflect.Interface {
-				mapValue.Set(reflect.ValueOf(value))
-			} else if isPrimitive(mapElemType.Kind()) {
-				if reflect.TypeOf(value).Kind() == mapElemType.Kind() {
-					mapValue.Set(reflect.ValueOf(value).Convert(mapElemType))
-				} else if mapElemType.Kind() == reflect.Int64 && reflect.TypeOf(value).Kind() == reflect.Float64 {
-					// Special handling for float64 to int64 conversion if necessary
-					mapValue.SetInt(int64(value.(float64)))
-				} else {
-					return fmt.Errorf("type mismatch for key %v in map, expected %v but got %T", key, mapElemType.Kind(), value)
-				}
-			} else if mapElemType.Kind() == reflect.Struct || (mapElemType.Kind() == reflect.Pointer && mapElemType.Elem().Kind() == reflect.Struct) {
-				if err := convertToStruct(value, mapValue.Addr().Interface()); err != nil {
-					return fmt.Errorf("error converting value for key %v: %v", key, err)
-				}
-			} else {
-				return fmt.Errorf("unsupported map element type: %v", mapElemType.Kind())
-			}
-
-			convertedMap.SetMapIndex(mapKey, mapValue)
-		}
-
-		field.Set(convertedMap)
-		return nil
+		return convertMapField(field, fieldValue)
 	}
 
 	if fieldKind == reflect.Struct {
@@ -118,23 +80,86 @@ func convertField(field reflect.Value, fieldType reflect.StructField, fieldValue
 	}
 
 	if fieldKind == reflect.Slice {
-		rawData, ok := fieldValue.([]interface{})
-		if !ok {
-			return fmt.Errorf("expected slice for field, but got %T", fieldValue)
-		}
-
-		convertedSlice := reflect.MakeSlice(field.Type(), 0, len(rawData))
-		for _, value := range rawData {
-			sliceElem := reflect.New(field.Type().Elem()).Elem()
-			if err := convertField(sliceElem, fieldType, value); err != nil {
-				return fmt.Errorf("error converting slice element: %v", err)
-			}
-			convertedSlice = reflect.Append(convertedSlice, sliceElem)
-		}
-		field.Set(convertedSlice)
-		return nil
+		return convertSliceField(field, fieldType, fieldValue)
 	}
 
+	return convertScalarField(field, fieldKind, fieldValue)
+}
+
+func convertMapField(field reflect.Value, fieldValue interface{}) error {
+	mapType := field.Type()
+	mapKeyType := mapType.Key()
+	mapElemType := mapType.Elem()
+
+	rawData, ok := fieldValue.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("expected map for field, but got %T", fieldValue)
+	}
+
+	convertedMap := reflect.MakeMap(mapType)
+	for key, value := range rawData {
+		mapValue, err := convertMapValue(mapElemType, key, value)
+		if err != nil {
+			return err
+		}
+		convertedMap.SetMapIndex(reflect.ValueOf(key).Convert(mapKeyType), mapValue)
+	}
+
+	field.Set(convertedMap)
+	return nil
+}
+
+func convertMapValue(mapElemType reflect.Type, key string, value interface{}) (reflect.Value, error) {
+	mapValue := reflect.New(mapElemType).Elem()
+
+	if mapElemType.Kind() == reflect.Interface {
+		mapValue.Set(reflect.ValueOf(value))
+		return mapValue, nil
+	}
+	if isPrimitive(mapElemType.Kind()) {
+		return convertPrimitiveMapValue(mapValue, mapElemType, key, value)
+	}
+	if mapElemType.Kind() == reflect.Struct || (mapElemType.Kind() == reflect.Pointer && mapElemType.Elem().Kind() == reflect.Struct) {
+		if err := convertToStruct(value, mapValue.Addr().Interface()); err != nil {
+			return mapValue, fmt.Errorf("error converting value for key %v: %v", key, err)
+		}
+		return mapValue, nil
+	}
+
+	return mapValue, fmt.Errorf("unsupported map element type: %v", mapElemType.Kind())
+}
+
+func convertPrimitiveMapValue(mapValue reflect.Value, mapElemType reflect.Type, key string, value interface{}) (reflect.Value, error) {
+	if reflect.TypeOf(value).Kind() == mapElemType.Kind() {
+		mapValue.Set(reflect.ValueOf(value).Convert(mapElemType))
+		return mapValue, nil
+	}
+	if mapElemType.Kind() == reflect.Int64 && reflect.TypeOf(value).Kind() == reflect.Float64 {
+		mapValue.SetInt(int64(value.(float64)))
+		return mapValue, nil
+	}
+	return mapValue, fmt.Errorf("type mismatch for key %v in map, expected %v but got %T", key, mapElemType.Kind(), value)
+}
+
+func convertSliceField(field reflect.Value, fieldType reflect.StructField, fieldValue interface{}) error {
+	rawData, ok := fieldValue.([]interface{})
+	if !ok {
+		return fmt.Errorf("expected slice for field, but got %T", fieldValue)
+	}
+
+	convertedSlice := reflect.MakeSlice(field.Type(), 0, len(rawData))
+	for _, value := range rawData {
+		sliceElem := reflect.New(field.Type().Elem()).Elem()
+		if err := convertField(sliceElem, fieldType, value); err != nil {
+			return fmt.Errorf("error converting slice element: %v", err)
+		}
+		convertedSlice = reflect.Append(convertedSlice, sliceElem)
+	}
+	field.Set(convertedSlice)
+	return nil
+}
+
+func convertScalarField(field reflect.Value, fieldKind reflect.Kind, fieldValue interface{}) error {
 	if fieldKind == reflect.String {
 		strValue := ToString(fieldValue)
 		field.SetString(strValue)

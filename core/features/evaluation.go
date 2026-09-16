@@ -1,12 +1,15 @@
 package features
 
 import (
+	cryptorand "crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"hash/fnv"
-	"math/rand"
 	"strings"
 	"time"
 )
+
+var cryptoRandRead = cryptorand.Read
 
 // GetFeatureValue determines the evaluated value for a given feature key based on the provided evaluation options.
 //
@@ -96,7 +99,7 @@ func isRolloutEligible(rollouts []*Rollout, opts EvaluationOptions) bool {
 		isRegionEligible := opts.Region == r.Region || r.Region == WildCardValue
 
 		if isPlatformEligible && isEnvironmentEligible && isRegionEligible {
-			return rand.Float64()*100 <= r.Percentage
+			return randomPercentage() <= r.Percentage
 		}
 	}
 
@@ -115,7 +118,7 @@ func selectVariant(feature *Feature, bucketKey string) interface{} {
 		_, _ = h.Write([]byte(bucketKey))
 		roll = float64(h.Sum64()%10000) / 100.0
 	} else {
-		roll = rand.Float64() * 100
+		roll = randomPercentage()
 	}
 
 	sum := 0.0
@@ -127,6 +130,18 @@ func selectVariant(feature *Feature, bucketKey string) interface{} {
 	}
 
 	return feature.DefaultValue
+}
+
+func randomPercentage() float64 {
+	var buf [8]byte
+	if _, err := cryptoRandRead(buf[:]); err != nil {
+		return 100
+	}
+	return cryptoUint64ToFloat64(buf) * 100
+}
+
+func cryptoUint64ToFloat64(buf [8]byte) float64 {
+	return float64(binary.BigEndian.Uint64(buf[:])) / float64(^uint64(0))
 }
 
 // evaluateConditions evaluates all conditions in the feature's rules block using the specified conjunction (AND/OR).

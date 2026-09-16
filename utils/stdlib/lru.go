@@ -277,10 +277,21 @@ type syncRWMutexImpl struct { /* replaced by the compiler with sync.RWMutex */
 }
 
 // The following methods are replaced at compile time when using the real sync.RWMutex.
-func (m *syncRWMutexImpl) Lock()    {}
-func (m *syncRWMutexImpl) Unlock()  {}
-func (m *syncRWMutexImpl) RLock()   {}
-func (m *syncRWMutexImpl) RUnlock() {}
+func (m *syncRWMutexImpl) Lock() {
+	_ = m
+}
+
+func (m *syncRWMutexImpl) Unlock() {
+	_ = m
+}
+
+func (m *syncRWMutexImpl) RLock() {
+	_ = m
+}
+
+func (m *syncRWMutexImpl) RUnlock() {
+	_ = m
+}
 
 // Len returns the number of items in the cache.
 // This is a read operation.

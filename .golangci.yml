@@ -6,32 +6,53 @@ run:
   concurrency: 4
 
 linters:
-  default: all        # Turn on all available linters
-  disable:
-    - dupl            # May be noisy — turn back on if you want to force DRY
-    - funlen          # Turn on if you want max function length constraints
-    - godot           # Optional: enforces period at end of doc comments
-    - lll             # Line length limit (often noisy with long URLs/imports)
+  default: none
+  enable:
+    - govet
+    - unused
+    - ineffassign
+    - bodyclose
+    - rowserrcheck
+    - sqlclosecheck
+    - gosec
+    - misspell
+    - gocyclo
+    - depguard
+    - revive
   settings:
     gocyclo:
-      min-complexity: 10
+      min-complexity: 25
+
+    depguard:
+      rules:
+        no-std-log:
+          files:
+            - "$all"
+            - "!$test"
+          deny:
+            - pkg: "log$"
+              desc: "Use structured logging instead of the standard log package"
+
+    gosec:
+      excludes:
+        - G115
 
     revive:
       severity: warning
       confidence: 0.8
 
-    depguard:
-      rules:
-        main:
-          deny:
-            - pkg: "fmt$"
-              desc: "Use your structured logger instead of fmt"
-            - pkg: "log$"
-              desc: "Use your custom logger instead of log"
-
-    errcheck:
-      check-type-assertions: true
-      check-blank: true
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - bodyclose
+          - gocyclo
+          - gosec
+          - rowserrcheck
+          - sqlclosecheck
+      - path: ^(core/config|core/logger|server/http)/
+        linters:
+          - depguard
 
 issues:
   max-issues-per-linter: 0

@@ -36,6 +36,7 @@ type fsHooks struct {
 	filepathWalk  func(string, filepath.WalkFunc) error
 	filepathMatch func(string, string) (bool, error)
 	filepathRel   func(string, string) (string, error)
+	filepathAbs   func(string) (string, error)
 	zipFileOpen   func(*zip.File) (io.ReadCloser, error)
 	newZipWriter  func(io.Writer) zipWriter
 }
@@ -65,6 +66,7 @@ func snapshotFSHooks() fsHooks {
 		filepathWalk:  filepathWalk,
 		filepathMatch: filepathMatch,
 		filepathRel:   filepathRel,
+		filepathAbs:   filepathAbs,
 		zipFileOpen:   zipFileOpen,
 		newZipWriter:  newZipWriter,
 	}
@@ -88,6 +90,7 @@ func (h fsHooks) restore() {
 	filepathWalk = h.filepathWalk
 	filepathMatch = h.filepathMatch
 	filepathRel = h.filepathRel
+	filepathAbs = h.filepathAbs
 	zipFileOpen = h.zipFileOpen
 	newZipWriter = h.newZipWriter
 }
@@ -935,6 +938,47 @@ func TestUnzipFile_AllCases(t *testing.T) {
 
 		err := UnzipFile(zipPath, filepath.Join(tempDir, "out-dir"))
 		require.Error(t, err)
+	})
+
+	t.Run("TargetAbsError", func(t *testing.T) {
+		hooks := snapshotFSHooks()
+		t.Cleanup(hooks.restore)
+
+		zipPath := filepath.Join(tempDir, "targetabs.zip")
+		createTestZip(t, zipPath, []mockZipFile{
+			{name: "file.txt", content: "hello", mode: 0644},
+		})
+
+		filepathAbs = func(string) (string, error) {
+			return "", errors.New("target abs fail")
+		}
+
+		err := UnzipFile(zipPath, filepath.Join(tempDir, "out-target-abs"))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "error resolving target path")
+	})
+
+	t.Run("ZipEntryAbsError", func(t *testing.T) {
+		hooks := snapshotFSHooks()
+		t.Cleanup(hooks.restore)
+
+		zipPath := filepath.Join(tempDir, "entryabs.zip")
+		createTestZip(t, zipPath, []mockZipFile{
+			{name: "file.txt", content: "hello", mode: 0644},
+		})
+
+		calls := 0
+		filepathAbs = func(path string) (string, error) {
+			calls++
+			if calls == 1 {
+				return hooks.filepathAbs(path)
+			}
+			return "", errors.New("entry abs fail")
+		}
+
+		err := UnzipFile(zipPath, filepath.Join(tempDir, "out-entry-abs"))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "error resolving zip entry path")
 	})
 }
 

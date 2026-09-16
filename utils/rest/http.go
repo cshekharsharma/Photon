@@ -25,6 +25,7 @@ type HttpClient interface {
 
 var (
 	readAllFn   = io.ReadAll
+	callStubFn  = httpstub.CallStub
 	closeBodyFn = func(c io.Closer) error {
 		return c.Close()
 	}
@@ -122,9 +123,7 @@ func IsHttpRequest(r *http.Request) bool {
 // MakeHTTPRequest returns:
 //   - (map[string]interface{}, error): On success, the parsed JSON response and no error;
 //     otherwise, an empty map and an error describing what went wrong.
-func MakeHTTPRequest(ctx context.Context, client HttpClient, request RequestEntity) (map[string]interface{}, error) {
-	var responseObject map[string]interface{}
-
+func MakeHTTPRequest(ctx context.Context, client HttpClient, request RequestEntity) (responseObject map[string]interface{}, err error) {
 	var cancel func()
 	if request.Timeout > 0 {
 		ctx, cancel = context.WithTimeout(ctx, request.Timeout)
@@ -148,19 +147,21 @@ func MakeHTTPRequest(ctx context.Context, client HttpClient, request RequestEnti
 	// If stubs are disabled or stub not found, CallStub returns nil response and we proceed to real call.
 	// If a stub returns a response or error, we handle that directly.
 	if request.StubID != "" && httpstub.IsStubbingEnabled() {
-		stubResp, stubErr := httpstub.CallStub(ctx, request.StubID)
+		stubResp, stubErr := callStubFn(ctx, request.StubID)
 		if stubErr != nil {
 			return responseObject, stubErr
 		}
 
 		if stubResp != nil {
+			defer func() {
+				if closeErr := stubResp.Body.Close(); err == nil && closeErr != nil {
+					err = closeErr
+				}
+			}()
+
 			responseData, readErr := readAllFn(stubResp.Body)
-			closeErr := closeBodyFn(stubResp.Body)
 			if readErr != nil {
 				return responseObject, readErr
-			}
-			if closeErr != nil {
-				return responseObject, closeErr
 			}
 
 			jsonErr := json.Unmarshal(responseData, &responseObject)
@@ -201,13 +202,15 @@ func MakeHTTPRequest(ctx context.Context, client HttpClient, request RequestEnti
 		return responseObject, fmt.Errorf("error: calling %s returned empty response", u.String())
 	}
 
+	defer func() {
+		if closeErr := res.Body.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}()
+
 	responseData, readErr := readAllFn(res.Body)
-	closeErr := closeBodyFn(res.Body)
 	if readErr != nil {
 		return responseObject, readErr
-	}
-	if closeErr != nil {
-		return responseObject, closeErr
 	}
 	jsonErr := json.Unmarshal(responseData, &responseObject)
 

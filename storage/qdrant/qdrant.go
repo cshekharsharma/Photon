@@ -3,17 +3,20 @@ package qdrant
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
-	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 )
+
+var cryptoRandRead = cryptorand.Read
 
 type restClient struct {
 	baseURL    string
@@ -207,91 +210,48 @@ func (c *restClient) GetCollectionInfo(ctx context.Context, collection string) (
 // ---------------- internal: hardened request executor ----------------
 
 func (c *restClient) doJSON(ctx context.Context, method, path string, in any, out any) error {
-	var payload []byte
-	var err error
-	if in != nil {
-		payload, err = json.Marshal(in)
-		if err != nil {
-			return err
-		}
+	payload, err := jsonPayload(in)
+	if err != nil {
+		return err
 	}
 
 	var lastErr error
 	for attempt := 1; attempt <= c.retryMaxAttempts; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(payload))
+		req, err := c.newRequest(ctx, method, path, payload, in != nil)
 		if err != nil {
 			return err
 		}
-		if in != nil {
-			req.Header.Set("Content-Type", "application/json")
-		}
-		if c.apiKey != "" {
-			// Qdrant supports "api-key"
-			req.Header.Set("api-key", c.apiKey)
+
+		statusCode, body, err := c.doRequest(req)
+		if err != nil && statusCode != 0 {
+			retry, retryErr := c.retryAfter(ctx, attempt, err)
+			lastErr = retryErr
+			if !retry {
+				break
+			}
+			continue
 		}
 
-		resp, err := c.httpClient.Do(req)
+		retry, err := c.handleRequestError(ctx, attempt, err)
 		if err != nil {
 			lastErr = err
-			if !isRetryableNetErr(err) || attempt == c.retryMaxAttempts {
+			if !retry {
 				break
-			}
-			if err := sleepCtx(ctx, c.backoff(attempt)); err != nil {
-				return err
 			}
 			continue
 		}
 
-		b, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20)) // 2MB cap
-		closeErr := resp.Body.Close()
-		if readErr != nil {
-			lastErr = readErr
-			if attempt == c.retryMaxAttempts {
+		retry, err = c.handleResponse(ctx, attempt, statusCode, body)
+		if err != nil {
+			lastErr = err
+			if !retry {
 				break
-			}
-			if err := sleepCtx(ctx, c.backoff(attempt)); err != nil {
-				return err
-			}
-			continue
-		}
-		if closeErr != nil {
-			lastErr = closeErr
-			if attempt == c.retryMaxAttempts {
-				break
-			}
-			if err := sleepCtx(ctx, c.backoff(attempt)); err != nil {
-				return err
 			}
 			continue
 		}
 
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			httpErr := &HTTPError{StatusCode: resp.StatusCode, Body: string(b)}
-			mapped := mapHTTPStatus(resp.StatusCode)
-			if mapped != nil {
-				lastErr = errors.Join(mapped, httpErr)
-			} else {
-				lastErr = httpErr
-			}
-
-			// Retry only on 429/5xx
-			if (resp.StatusCode == 429 || resp.StatusCode >= 500) && attempt < c.retryMaxAttempts {
-				if err := sleepCtx(ctx, c.backoff(attempt)); err != nil {
-					return err
-				}
-				continue
-			}
-			break
-		}
-
-		if out != nil {
-			// Treat empty (or all-whitespace) body as successful when caller expects a response.
-			if len(bytes.TrimSpace(b)) == 0 {
-				return nil
-			}
-			if err := json.Unmarshal(b, out); err != nil {
-				return err
-			}
+		if err := decodeJSONBody(body, out); err != nil {
+			return err
 		}
 		return nil
 	}
@@ -302,6 +262,102 @@ func (c *restClient) doJSON(ctx context.Context, method, path string, in any, ou
 	return errors.New("qdrant: request failed")
 }
 
+func jsonPayload(in any) ([]byte, error) {
+	if in == nil {
+		return nil, nil
+	}
+	return json.Marshal(in)
+}
+
+func (c *restClient) newRequest(ctx context.Context, method, path string, payload []byte, hasPayload bool) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	if hasPayload {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.apiKey != "" {
+		req.Header.Set("api-key", c.apiKey)
+	}
+	return req, nil
+}
+
+func (c *restClient) doRequest(req *http.Request) (int, []byte, error) {
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20)) // 2MB cap
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		return resp.StatusCode, nil, readErr
+	}
+	if closeErr != nil {
+		return resp.StatusCode, nil, closeErr
+	}
+	return resp.StatusCode, body, nil
+}
+
+func (c *restClient) handleRequestError(ctx context.Context, attempt int, requestErr error) (bool, error) {
+	if requestErr == nil {
+		return false, nil
+	}
+	if !isRetryableNetErr(requestErr) || attempt == c.retryMaxAttempts {
+		return false, requestErr
+	}
+	if err := sleepCtx(ctx, c.backoff(attempt)); err != nil {
+		return false, err
+	}
+	return true, requestErr
+}
+
+func (c *restClient) handleResponse(ctx context.Context, attempt int, statusCode int, body []byte) (bool, error) {
+	if err := qdrantStatusError(statusCode, body); err != nil {
+		if isRetryableStatus(statusCode) {
+			retry, retryErr := c.retryAfter(ctx, attempt, err)
+			return retry, retryErr
+		}
+		return false, err
+	}
+
+	return false, nil
+}
+
+func qdrantStatusError(statusCode int, body []byte) error {
+	if statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
+		return nil
+	}
+
+	httpErr := &HTTPError{StatusCode: statusCode, Body: string(body)}
+	if mapped := mapHTTPStatus(statusCode); mapped != nil {
+		return errors.Join(mapped, httpErr)
+	}
+	return httpErr
+}
+
+func isRetryableStatus(statusCode int) bool {
+	return statusCode == http.StatusTooManyRequests || statusCode >= http.StatusInternalServerError
+}
+
+func (c *restClient) retryAfter(ctx context.Context, attempt int, originalErr error) (bool, error) {
+	if attempt == c.retryMaxAttempts {
+		return false, originalErr
+	}
+	if err := sleepCtx(ctx, c.backoff(attempt)); err != nil {
+		return false, err
+	}
+	return true, originalErr
+}
+
+func decodeJSONBody(body []byte, out any) error {
+	if out == nil || len(bytes.TrimSpace(body)) == 0 {
+		return nil
+	}
+	return json.Unmarshal(body, out)
+}
+
 func (c *restClient) backoff(attempt int) time.Duration {
 	// attempt: 1 => after first failure
 	d := c.retryBaseDelay * (1 << (attempt - 1))
@@ -309,13 +365,21 @@ func (c *restClient) backoff(attempt int) time.Duration {
 		d = c.retryMaxDelay
 	}
 	if c.retryJitter > 0 {
-		j := (rand.Float64()*2 - 1) * c.retryJitter
+		j := (cryptoFloat64()*2 - 1) * c.retryJitter
 		d = time.Duration(float64(d) * (1 + j))
 		if d < 0 {
 			d = 0
 		}
 	}
 	return d
+}
+
+func cryptoFloat64() float64 {
+	var buf [8]byte
+	if _, err := cryptoRandRead(buf[:]); err != nil {
+		return 1
+	}
+	return float64(binary.BigEndian.Uint64(buf[:])) / float64(^uint64(0))
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {

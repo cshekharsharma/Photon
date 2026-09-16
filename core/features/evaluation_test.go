@@ -1,6 +1,7 @@
 package features
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -13,6 +14,16 @@ func mockSetConfig(cfg *FeatureConfig) {
 	defer mutex.Unlock()
 	configCache = cfg
 	areFeaturesInitialized = true
+}
+
+func TestRandomPercentage_ReadError(t *testing.T) {
+	originalRead := cryptoRandRead
+	cryptoRandRead = func([]byte) (int, error) {
+		return 0, errors.New("entropy unavailable")
+	}
+	t.Cleanup(func() { cryptoRandRead = originalRead })
+
+	assert.Equal(t, 100.0, randomPercentage())
 }
 
 func TestGetFeatureValue_ValidEvaluation(t *testing.T) {

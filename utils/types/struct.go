@@ -96,125 +96,166 @@ func setValueForStructToMap(field reflect.Value, value reflect.Value) error {
 	}
 
 	fieldType := field.Type()
-
 	if fieldType.Kind() == reflect.Pointer {
-		fieldType = fieldType.Elem()
-		if field.IsNil() {
-			field.Set(reflect.New(fieldType))
-		}
-		field = field.Elem()
+		field, fieldType = ensurePointerField(field)
 	}
 
-	//handle the map[string]V to map[K]V conversion
-	if fieldType.Kind() == reflect.Map &&
-		fieldType.Key().Kind() == reflect.String &&
-		value.Kind() == reflect.Map {
-
-		rawMap, ok := value.Interface().(map[string]interface{})
-		if ok {
-			elemType := fieldType.Elem()
-			newMap := reflect.MakeMap(fieldType)
-
-			for k, v := range rawMap {
-				elemVal := reflect.New(elemType).Elem()
-				switch elemType.Kind() {
-				case reflect.Struct:
-					if subMap, ok := v.(map[string]interface{}); ok {
-						// recursively populate nested struct
-						if err := PopulateStructFromMap(elemVal.Addr().Interface(), subMap); err != nil {
-							return fmt.Errorf("failed to populate map struct for key '%s': %w", k, err)
-						}
-					}
-				default:
-					val := reflect.ValueOf(v)
-					if val.Type().ConvertibleTo(elemType) {
-						elemVal.Set(val.Convert(elemType))
-					}
-				}
-				newMap.SetMapIndex(reflect.ValueOf(k), elemVal)
-			}
-
-			field.Set(newMap)
-			return nil
-		}
+	if handled, err := setMapField(field, fieldType, value); handled || err != nil {
+		return err
 	}
 
-	// Handle nested struct
-	if fieldType.Kind() == reflect.Struct && value.Kind() == reflect.Map {
-		mapVal, ok := value.Interface().(map[string]interface{})
-		if ok {
-			return PopulateStructFromMap(field.Addr().Interface(), mapVal)
-		}
+	if handled, err := setNestedStructField(field, fieldType, value); handled || err != nil {
+		return err
 	}
 
-	// Handle string input
 	if value.Kind() == reflect.String {
-		strValue := value.String()
-
-		switch fieldType.Kind() {
-		case reflect.Bool:
-			boolVal, err := strconv.ParseBool(strValue)
-			if err != nil {
-				return fmt.Errorf("could not parse '%v' as bool: %v", strValue, err)
-			}
-			field.SetBool(boolVal)
-			return nil
-
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			intVal, err := strconv.ParseInt(strValue, 10, 64)
-			if err != nil {
-				return fmt.Errorf("could not convert '%v' to int: %v", strValue, err)
-			}
-			field.SetInt(intVal)
-			return nil
-
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-			uintVal, err := strconv.ParseUint(strValue, 10, 64)
-			if err != nil {
-				return fmt.Errorf("could not convert '%v' to uint: %v", strValue, err)
-			}
-			field.SetUint(uintVal)
-			return nil
-
-		case reflect.Float32, reflect.Float64:
-			floatVal, err := strconv.ParseFloat(strValue, 64)
-			if err != nil {
-				return fmt.Errorf("could not convert '%v' to float: %v", strValue, err)
-			}
-			field.SetFloat(floatVal)
-			return nil
-
-		case reflect.Struct:
-			if field.Type() == reflect.TypeOf(time.Time{}) {
-				parsedTime, err := time.Parse(time.DateTime, strValue)
-				if err != nil {
-					return fmt.Errorf("could not parse '%v' as time: %v", strValue, err)
-				}
-				field.Set(reflect.ValueOf(parsedTime))
-				return nil
-			}
-		}
+		return setStringField(field, fieldType, value.String())
 	}
 
-	// float64 to int
-	if value.Kind() == reflect.Float64 && fieldType.Kind() == reflect.Int {
-		field.SetInt(int64(value.Float()))
-		return nil
-	}
-
-	// int to bool
-	if fieldType.Kind() == reflect.Bool && value.Kind() == reflect.Int {
-		field.SetBool(value.Int() != 0)
+	if setSpecialNumericField(field, fieldType, value) {
 		return nil
 	}
 
 	if value.Type().ConvertibleTo(fieldType) {
 		field.Set(value.Convert(fieldType))
-	} else {
-		return fmt.Errorf("type mismatch: cannot convert from %v to %v", value.Type(), fieldType)
+		return nil
 	}
 
+	return fmt.Errorf("type mismatch: cannot convert from %v to %v", value.Type(), fieldType)
+}
+
+func ensurePointerField(field reflect.Value) (reflect.Value, reflect.Type) {
+	fieldType := field.Type().Elem()
+	if field.IsNil() {
+		field.Set(reflect.New(fieldType))
+	}
+	return field.Elem(), fieldType
+}
+
+func setMapField(field reflect.Value, fieldType reflect.Type, value reflect.Value) (bool, error) {
+	if fieldType.Kind() != reflect.Map || fieldType.Key().Kind() != reflect.String || value.Kind() != reflect.Map {
+		return false, nil
+	}
+
+	rawMap, ok := value.Interface().(map[string]interface{})
+	if !ok {
+		return false, nil
+	}
+
+	newMap, err := convertStringInterfaceMap(rawMap, fieldType)
+	if err != nil {
+		return true, err
+	}
+	field.Set(newMap)
+	return true, nil
+}
+
+func convertStringInterfaceMap(rawMap map[string]interface{}, fieldType reflect.Type) (reflect.Value, error) {
+	elemType := fieldType.Elem()
+	newMap := reflect.MakeMap(fieldType)
+
+	for k, v := range rawMap {
+		elemVal, err := convertStructMapElement(k, v, elemType)
+		if err != nil {
+			return newMap, err
+		}
+		newMap.SetMapIndex(reflect.ValueOf(k), elemVal)
+	}
+
+	return newMap, nil
+}
+
+func convertStructMapElement(key string, rawValue interface{}, elemType reflect.Type) (reflect.Value, error) {
+	elemVal := reflect.New(elemType).Elem()
+	if elemType.Kind() == reflect.Struct {
+		if subMap, ok := rawValue.(map[string]interface{}); ok {
+			if err := PopulateStructFromMap(elemVal.Addr().Interface(), subMap); err != nil {
+				return elemVal, fmt.Errorf("failed to populate map struct for key '%s': %w", key, err)
+			}
+		}
+		return elemVal, nil
+	}
+
+	val := reflect.ValueOf(rawValue)
+	if val.Type().ConvertibleTo(elemType) {
+		elemVal.Set(val.Convert(elemType))
+	}
+	return elemVal, nil
+}
+
+func setNestedStructField(field reflect.Value, fieldType reflect.Type, value reflect.Value) (bool, error) {
+	if fieldType.Kind() != reflect.Struct || value.Kind() != reflect.Map {
+		return false, nil
+	}
+	mapVal, ok := value.Interface().(map[string]interface{})
+	if !ok {
+		return false, nil
+	}
+	return true, PopulateStructFromMap(field.Addr().Interface(), mapVal)
+}
+
+func setStringField(field reflect.Value, fieldType reflect.Type, strValue string) error {
+	switch fieldType.Kind() {
+	case reflect.String:
+		field.SetString(strValue)
+		return nil
+	case reflect.Bool:
+		boolVal, err := strconv.ParseBool(strValue)
+		if err != nil {
+			return fmt.Errorf("could not parse '%v' as bool: %v", strValue, err)
+		}
+		field.SetBool(boolVal)
+		return nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		intVal, err := strconv.ParseInt(strValue, 10, 64)
+		if err != nil {
+			return fmt.Errorf("could not convert '%v' to int: %v", strValue, err)
+		}
+		field.SetInt(intVal)
+		return nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		uintVal, err := strconv.ParseUint(strValue, 10, 64)
+		if err != nil {
+			return fmt.Errorf("could not convert '%v' to uint: %v", strValue, err)
+		}
+		field.SetUint(uintVal)
+		return nil
+	case reflect.Float32, reflect.Float64:
+		floatVal, err := strconv.ParseFloat(strValue, 64)
+		if err != nil {
+			return fmt.Errorf("could not convert '%v' to float: %v", strValue, err)
+		}
+		field.SetFloat(floatVal)
+		return nil
+	case reflect.Struct:
+		return setStringStructField(field, strValue)
+	default:
+		return fmt.Errorf("type mismatch: cannot convert from string to %v", fieldType)
+	}
+}
+
+func setStringStructField(field reflect.Value, strValue string) error {
+	if field.Type() != reflect.TypeOf(time.Time{}) {
+		return fmt.Errorf("type mismatch: cannot convert from string to %v", field.Type())
+	}
+	parsedTime, err := time.Parse(time.DateTime, strValue)
+	if err != nil {
+		return fmt.Errorf("could not parse '%v' as time: %v", strValue, err)
+	}
+	field.Set(reflect.ValueOf(parsedTime))
 	return nil
+}
+
+func setSpecialNumericField(field reflect.Value, fieldType reflect.Type, value reflect.Value) bool {
+	if value.Kind() == reflect.Float64 && fieldType.Kind() == reflect.Int {
+		field.SetInt(int64(value.Float()))
+		return true
+	}
+	if fieldType.Kind() == reflect.Bool && value.Kind() == reflect.Int {
+		field.SetBool(value.Int() != 0)
+		return true
+	}
+	return false
 }
 
 // convertMapToTypedMap converts a map[string]V or map[string]interface{} to map[K]V

@@ -30,7 +30,7 @@ func Recoverer(logger logger.Logger) func(http.Handler) http.Handler {
 
 						// This call is made before the code reaching our handlers,
 						// we don't want to log things that are coming before
-						// our own code, just from our handlers and donwards.
+						// our own code, just from our handlers and downwards.
 						if tFunc == "net/http.HandlerFunc.ServeHTTP" {
 							break
 						}
@@ -53,7 +53,7 @@ func Recoverer(logger logger.Logger) func(http.Handler) http.Handler {
 
 					// Send JSON response to API clients only if it is a web request.
 					if rest.IsHttpRequest(r) {
-						errMsg := "Error: An internal server error occured."
+						errMsg := "Error: An internal server error occurred."
 						apiresponse.New(false, apiresponse.InternalServerError, new(any), errMsg).Send(w, http.StatusInternalServerError)
 						return
 					}

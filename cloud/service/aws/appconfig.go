@@ -2,7 +2,7 @@ package aws
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"sync"
@@ -217,7 +217,7 @@ func (a *AppConfig) watchConfigOnce(ctx context.Context, input *appconfig.WatchC
 			newToken = configResp.NextPollConfigurationToken
 
 			if len(configResp.Configuration) > 0 {
-				hash := sha1.Sum(configResp.Configuration)
+				hash := sha256.Sum256(configResp.Configuration)
 				hashStr := fmt.Sprintf("%x", hash[:])
 				result := &appconfig.FetchConfigResult{
 					ConfigProfile: input.ConfigProfile,

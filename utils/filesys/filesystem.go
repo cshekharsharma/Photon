@@ -31,6 +31,7 @@ var (
 	filepathWalk  = filepath.Walk
 	filepathMatch = filepath.Match
 	filepathRel   = filepath.Rel
+	filepathAbs   = filepath.Abs
 	zipFileOpen   = func(f *zip.File) (io.ReadCloser, error) { return f.Open() }
 	newZipWriter  = func(w io.Writer) zipWriter { return zip.NewWriter(w) }
 )
@@ -288,22 +289,30 @@ func UnzipFile(source, target string) error {
 	}
 	defer closeCloser(reader)
 
+	targetRoot, err := filepathAbs(target)
+	if err != nil {
+		return fmt.Errorf("error resolving target path: %w", err)
+	}
+
 	for _, file := range reader.File {
-		path := filepath.Join(target, file.Name)
-		// to void zip slip attacks
-		if !strings.HasPrefix(filepath.Clean(path), filepath.Clean(filepath.Dir(source))+string(os.PathSeparator)) {
+		path, err := filepathAbs(filepath.Join(targetRoot, file.Name)) // #nosec G305 -- zip entry path is validated against targetRoot before use.
+		if err != nil {
+			return fmt.Errorf("error resolving zip entry path: %w", err)
+		}
+
+		if path != targetRoot && !strings.HasPrefix(path, targetRoot+string(os.PathSeparator)) {
 			return fmt.Errorf("illegal target path: %s", path)
 		}
 
 		if file.FileInfo().IsDir() {
-			err := osMkdirAll(path, os.ModePerm)
+			err := osMkdirAll(path, 0750)
 			if err != nil {
 				return fmt.Errorf("error making directory: %w", err)
 			}
 			continue
 		}
 
-		err = osMkdirAll(filepath.Dir(path), os.ModePerm)
+		err = osMkdirAll(filepath.Dir(path), 0750)
 		if err != nil {
 			return fmt.Errorf("error making directory: %w", err)
 		}

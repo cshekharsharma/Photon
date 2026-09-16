@@ -143,3 +143,23 @@ func TestNewSafeLRUPanicsOnNil(t *testing.T) {
 	}()
 	_ = NewSafeLRU[string, int](nil)
 }
+
+func TestSyncRWMutexImplNoopMethods(t *testing.T) {
+	var m syncRWMutexImpl
+	locked := false
+
+	m.Lock()
+	locked = true
+	m.Unlock()
+	if !locked {
+		t.Fatal("expected write lock path to run")
+	}
+
+	readLocked := false
+	m.RLock()
+	readLocked = true
+	m.RUnlock()
+	if !readLocked {
+		t.Fatal("expected read lock path to run")
+	}
+}

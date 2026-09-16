@@ -1,7 +1,6 @@
 package encoding
 
 import (
-	"crypto/md5"
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/hex"
@@ -10,14 +9,7 @@ import (
 	"hash/fnv"
 )
 
-// HashMD5 computes the MD5 hash of the input data.
-// It returns the hash as a hexadecimal string.
-func HashMD5(input []byte) string {
-	hash := md5.Sum(input)
-	return hex.EncodeToString(hash[:])
-}
-
-// HashSHA1 computes the SHA-1 hash of the input data.
+// HashSHA256 computes the SHA-256 hash of the input data.
 // It returns the hash as a hexadecimal string.
 func HashSHA256(input []byte) string {
 	hash := sha256.Sum256(input)
@@ -35,7 +27,7 @@ func HashSHA512(input []byte) string {
 // It returns the hash as a hexadecimal string.
 func HashFNV32(input []byte) string {
 	h := fnv.New32()
-	h.Write(input)
+	_, _ = h.Write(input)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -43,7 +35,7 @@ func HashFNV32(input []byte) string {
 // It returns the hash as a hexadecimal string.
 func HashFNV64(input []byte) string {
 	h := fnv.New64()
-	h.Write(input)
+	_, _ = h.Write(input)
 	return hex.EncodeToString(h.Sum(nil))
 }
 

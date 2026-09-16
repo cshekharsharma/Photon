@@ -1,7 +1,7 @@
 package mysql
 
 import (
-	"crypto/sha1"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -19,7 +19,7 @@ import (
 var helperMySqlConnector MySqlDbConnectorInterface = &MySqlDbConnector{}
 var scanReadRow = func(rows *sql.Rows, dest ...interface{}) error { return rows.Scan(dest...) }
 var getReadColumns = func(rows *sql.Rows) ([]string, error) { return rows.Columns() }
-var newHashWriter = func() hashWriter { return sha1.New() }
+var newHashWriter = func() hashWriter { return sha256.New() }
 
 type hashWriter interface {
 	Write(p []byte) (n int, err error)
@@ -59,7 +59,9 @@ func ExecuteReadQuery(dbctx *DBContext, queryInput ReadQueryInput) ([]map[string
 	}
 
 	if stmt != nil {
-		defer closeSQLCloser(stmt)
+		defer func() {
+			_ = stmt.Close()
+		}()
 	}
 
 	rows, err := dbctx.Query(queryInput.Query, queryInput.Params...)
@@ -69,7 +71,9 @@ func ExecuteReadQuery(dbctx *DBContext, queryInput ReadQueryInput) ([]map[string
 	}
 
 	if rows != nil {
-		defer closeSQLCloser(rows)
+		defer func() {
+			_ = rows.Close()
+		}()
 	}
 
 	columns, err := getReadColumns(rows)

@@ -4,7 +4,6 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/base64"
 	"fmt"
-	"math/rand"
 	"reflect"
 	"strconv"
 	"strings"
@@ -124,22 +123,27 @@ func IsASCII(s string) bool {
 	return true
 }
 
-// GetRandomString generates a random string of the specified length using the math/rand package.
-// This function is not crypto-safe and should not be used for security-sensitive usecases.
+// GetRandomString generates a random string of the specified length.
 func GetRandomString(length int64) string {
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	if length <= 0 {
+		return ""
+	}
+
 	const letterBytes = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	randomBytes := make([]byte, length)
+	if _, err := cryptoRandRead(randomBytes); err != nil {
+		return ""
+	}
+
 	b := make([]byte, length)
 	for i := range b {
-		b[i] = letterBytes[r.Intn(len(letterBytes))]
+		b[i] = letterBytes[int(randomBytes[i])%len(letterBytes)]
 	}
 	return string(b)
 }
 
 // GetCryptoSafeRandomString generates a random string of the specified length using the crypto/rand package.
 // The string is URL-safe and does not contain any padding characters.
-// Important to note that this function is approximately 3x slower than GetRandomString()
-// and therefore should be used only for security-sensitive usecases.
 func GetCryptoSafeRandomString(length uint8) (string, error) {
 	bytes := make([]byte, length)
 	_, err := cryptoRandRead(bytes)

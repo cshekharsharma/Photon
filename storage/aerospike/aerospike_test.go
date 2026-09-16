@@ -381,14 +381,14 @@ func TestRegistryHardening(t *testing.T) {
 }
 
 func TestConnectionTimeoutConfig(t *testing.T) {
-	timeout := getConnectionTimeout("non-existant-cluster-3bewkr6")
+	timeout := getConnectionTimeout("non-existent-cluster-3bewkr6")
 
 	assert.NotNil(t, timeout)
 	assert.Equal(t, 20*time.Second, timeout)
 }
 
 func TestGetDefaultRecordTTLConfig(t *testing.T) {
-	ttl := getDefaultRecordTTL("non-existant-cluster-3bewkr6")
+	ttl := getDefaultRecordTTL("non-existent-cluster-3bewkr6")
 
 	assert.NotNil(t, ttl)
 	assert.Equal(t, uint32(1800), ttl)

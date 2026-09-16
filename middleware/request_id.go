@@ -11,7 +11,7 @@ type ctxKey int
 
 const ridKey ctxKey = ctxKey(0)
 
-// Retrive unique request id from the provided context object.
+// Retrieve unique request id from the provided context object.
 func GetRequestID(ctx context.Context) string {
 	val := ctx.Value(ridKey)
 	if val == nil {

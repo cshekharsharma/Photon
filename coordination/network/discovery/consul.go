@@ -131,7 +131,7 @@ func (c *consulDiscovery) Register(ctx context.Context, instance *ServiceInstanc
 			select {
 			case <-ctx.Done():
 				c.logger.Warn("context done, deregistering service %s", instance.ID)
-				cleanupCtx, cancel := context.WithTimeout(context.Background(), defaultDeregisterTimeout)
+				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultDeregisterTimeout)
 				if err := c.Deregister(cleanupCtx, instance.ID); err != nil {
 					c.logger.Error("failed to deregister service %s: %v", instance.ID, err)
 				}

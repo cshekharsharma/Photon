@@ -4,9 +4,10 @@ package backoff
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/binary"
 	"errors"
 	"math"
-	"math/rand"
 	"sync"
 	"time"
 
@@ -23,6 +24,8 @@ var (
 	ExponentialFactor   = 2.0                    // Default exponential factor for delay growth
 	DeterministicJitter = true                   // Default deterministic mode for testing
 )
+
+var cryptoRandRead = cryptorand.Read
 
 // RetryContext holds metadata about a retry attempt, including the attempt number,
 // delay used, and the error returned by the function.
@@ -57,7 +60,6 @@ type Backoff struct {
 	Deterministic     bool           // Enables deterministic mode for testing
 
 	mutex sync.Mutex
-	rng   *rand.Rand
 }
 
 // Option is a functional option type for configuring a Backoff instance.
@@ -148,7 +150,6 @@ func NewBackoff(opts ...Option) *Backoff {
 		MaxRetries: MaximumRetries,
 		Factor:     ExponentialFactor,
 		Jitter:     DeterministicJitter,
-		rng:        rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 
 	for _, opt := range opts {
@@ -187,7 +188,7 @@ func (b *Backoff) randFloat() float64 {
 		return 1.0
 	}
 
-	return b.rng.Float64()
+	return cryptoFloat64()
 }
 
 // Retry executes a given function with retry logic using exponential backoff.
@@ -278,10 +279,16 @@ func (b *Backoff) Retry(ctx context.Context, fn func(context.Context, ...any) (a
 	return nil, ErrMaxRetriesExceeded
 }
 
-// Reset reinitializes the random number generator.
-// This is useful for deterministic testing scenarios.
+// Reset is retained for backwards compatibility. The crypto random source is stateless.
 func (b *Backoff) Reset() {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
-	b.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
+}
+
+func cryptoFloat64() float64 {
+	var buf [8]byte
+	if _, err := cryptoRandRead(buf[:]); err != nil {
+		return 1
+	}
+	return float64(binary.BigEndian.Uint64(buf[:])) / float64(^uint64(0))
 }
