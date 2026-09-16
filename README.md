@@ -1,11 +1,10 @@
 # Photon
 
 [![CI](https://github.com/cshekharsharma/photon/actions/workflows/ci.yml/badge.svg)](https://github.com/cshekharsharma/photon/actions/workflows/ci.yml)
-[![Coverage](https://github.com/cshekharsharma/photon/actions/workflows/coverage-gate.yml/badge.svg)](https://github.com/cshekharsharma/photon/actions/workflows/coverage-gate.yml)
 [![codecov](https://codecov.io/gh/cshekharsharma/photon/branch/main/graph/badge.svg)](https://codecov.io/gh/cshekharsharma/photon)
+[![Coverage](https://github.com/cshekharsharma/photon/actions/workflows/coverage-gate.yml/badge.svg)](https://github.com/cshekharsharma/photon/actions/workflows/coverage-gate.yml)
 [![Lint](https://github.com/cshekharsharma/photon/actions/workflows/lint.yml/badge.svg)](https://github.com/cshekharsharma/photon/actions/workflows/lint.yml)
 [![Security](https://github.com/cshekharsharma/photon/actions/workflows/security.yml/badge.svg)](https://github.com/cshekharsharma/photon/actions/workflows/security.yml)
-[![Go Reference](https://pkg.go.dev/badge/github.com/cshekharsharma/photon.svg)](https://pkg.go.dev/github.com/cshekharsharma/photon)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/cshekharsharma/photon)](https://github.com/cshekharsharma/photon/blob/main/go.mod)
 [![License](https://img.shields.io/github/license/cshekharsharma/photon)](./LICENSE)
 
