@@ -1,0 +1,42 @@
+name: Coverage
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    name: Coverage Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Generate coverage report
+        run: |
+          set -euo pipefail
+          go run tools/gotest_exec.go --skip-mocks
+          go run tools/gotest_coverage.go
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.txt
+          fail_ci_if_error: true
+
+      - name: Enforce 100% coverage gate
+        run: |
+          set -euo pipefail
+          go tool cover -func=coverage.txt | awk '$3 != "100.0%" { print; failed = 1 } END { exit failed }'

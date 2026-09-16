@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -221,9 +222,22 @@ func TestConfigureFileLogger(t *testing.T) {
 	})
 
 	t.Run("MkdirError", func(t *testing.T) {
+		originalStat := fileLoggerStat
+		originalMkdir := fileLoggerMkdir
+		fileLoggerStat = func(string) (os.FileInfo, error) {
+			return nil, os.ErrNotExist
+		}
+		fileLoggerMkdir = func(string, os.FileMode) error {
+			return errors.New("mkdir failed")
+		}
+		t.Cleanup(func() {
+			fileLoggerStat = originalStat
+			fileLoggerMkdir = originalMkdir
+		})
+
 		config := &LoggerConfig{
 			Name:    "NoPerm",
-			BaseDir: "/root/forbidden_dir",
+			BaseDir: filepath.Join(t.TempDir(), "forbidden-dir"),
 		}
 
 		_, err := configureFileLogger(config)
@@ -233,22 +247,22 @@ func TestConfigureFileLogger(t *testing.T) {
 	})
 
 	t.Run("OpenFileError", func(t *testing.T) {
-		tmpFile, err := os.CreateTemp("", "logger_file")
-		if err != nil {
-			t.Fatalf("failed to create temp file: %v", err)
+		originalOpenFile := fileLoggerOpenFile
+		fileLoggerOpenFile = func(string, int, os.FileMode) (*os.File, error) {
+			return nil, errors.New("open failed")
 		}
-		defer func() {
-			assert.NoError(t, os.Remove(tmpFile.Name()))
-		}()
+		t.Cleanup(func() {
+			fileLoggerOpenFile = originalOpenFile
+		})
 
 		config := &LoggerConfig{
 			Name:    "BadDir",
-			BaseDir: tmpFile.Name(),
+			BaseDir: t.TempDir(),
 		}
 
-		_, err = configureFileLogger(config)
+		_, err := configureFileLogger(config)
 		if err == nil {
-			t.Fatalf("expected error for open file in non-directory")
+			t.Fatalf("expected error for open file failure")
 		}
 	})
 }

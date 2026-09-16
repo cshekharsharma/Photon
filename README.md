@@ -1,10 +1,12 @@
 # Photon
 
 [![CI](https://github.com/cshekharsharma/photon/actions/workflows/ci.yml/badge.svg)](https://github.com/cshekharsharma/photon/actions/workflows/ci.yml)
-[![Coverage Gate](https://img.shields.io/badge/coverage%20gate-100%25-brightgreen)](https://github.com/cshekharsharma/photon/actions/workflows/ci.yml)
-[![Code Quality](https://img.shields.io/badge/code%20quality-golangci--lint-blue)](./.golangci.yml)
+[![Coverage](https://github.com/cshekharsharma/photon/actions/workflows/coverage-gate.yml/badge.svg)](https://github.com/cshekharsharma/photon/actions/workflows/coverage-gate.yml)
+[![codecov](https://codecov.io/gh/cshekharsharma/photon/branch/main/graph/badge.svg)](https://codecov.io/gh/cshekharsharma/photon)
+[![Lint](https://github.com/cshekharsharma/photon/actions/workflows/lint.yml/badge.svg)](https://github.com/cshekharsharma/photon/actions/workflows/lint.yml)
+[![Security](https://github.com/cshekharsharma/photon/actions/workflows/security.yml/badge.svg)](https://github.com/cshekharsharma/photon/actions/workflows/security.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/cshekharsharma/photon.svg)](https://pkg.go.dev/github.com/cshekharsharma/photon)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/cshekharsharma/photon)](https://github.com/cshekharsharma/photon/blob/master/go.mod)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/cshekharsharma/photon)](https://github.com/cshekharsharma/photon/blob/main/go.mod)
 [![License](https://img.shields.io/github/license/cshekharsharma/photon)](./LICENSE)
 
 Photon is a lightweight Go service toolkit for building production backends without rebuilding the same infrastructure plumbing in every service.
@@ -133,7 +135,7 @@ go test -race ./cloud ./cloud/providers ./cloud/service/aws ./core/logger ./tele
 
 Contributions should be small, tested, and easy to review.
 
-- Branch from `master`.
+- Branch from `main`.
 - Keep public APIs backward-compatible unless the change is intentionally breaking.
 - Add focused tests for new behavior and failure paths.
 - Run formatting, linting, tests, race tests where relevant, and vulnerability checks.
