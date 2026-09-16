@@ -1,5 +1,6 @@
 # Photon
 
+[![Release](https://img.shields.io/github/v/release/cshekharsharma/photon)](https://github.com/cshekharsharma/photon/releases)
 [![CI](https://github.com/cshekharsharma/photon/actions/workflows/ci.yml/badge.svg)](https://github.com/cshekharsharma/photon/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/cshekharsharma/photon/branch/main/graph/badge.svg)](https://codecov.io/gh/cshekharsharma/photon)
 [![Coverage](https://github.com/cshekharsharma/photon/actions/workflows/coverage-gate.yml/badge.svg)](https://github.com/cshekharsharma/photon/actions/workflows/coverage-gate.yml)
