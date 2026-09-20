@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"context"
 	"database/sql"
 	"testing"
 
@@ -27,6 +28,25 @@ func (m *MockTx) Query(query string, args ...any) (*sql.Rows, error) {
 	return argsSlice.Get(0).(*sql.Rows), argsSlice.Error(1)
 }
 
+type MockTxContext struct {
+	MockTx
+}
+
+func (m *MockTxContext) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	argsSlice := m.Called(ctx, query, args)
+	return argsSlice.Get(0).(sql.Result), argsSlice.Error(1)
+}
+
+func (m *MockTxContext) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
+	argsSlice := m.Called(ctx, query)
+	return argsSlice.Get(0).(*sql.Stmt), argsSlice.Error(1)
+}
+
+func (m *MockTxContext) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	argsSlice := m.Called(ctx, query, args)
+	return argsSlice.Get(0).(*sql.Rows), argsSlice.Error(1)
+}
+
 type MockResult struct {
 	mock.Mock
 }
@@ -46,6 +66,117 @@ func TestDBContext_Exec(t *testing.T) {
 	res, err := ctx.Exec("fake", 1)
 	assert.NoError(t, err)
 	assert.Equal(t, mockResult, res)
+}
+
+func TestDBContext_ContextOverridesAndCancellation(t *testing.T) {
+	mockResult := new(MockResult)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	t.Run("ExecContextFnReceivesContext", func(t *testing.T) {
+		receivedCanceledContext := false
+		dbctx := &DBContext{
+			ExecContextFn: func(c context.Context, query string, args ...any) (sql.Result, error) {
+				receivedCanceledContext = c.Err() == context.Canceled
+				assert.Equal(t, "UPDATE x SET y = ?", query)
+				assert.Equal(t, []any{1}, args)
+				return mockResult, c.Err()
+			},
+		}
+
+		res, err := dbctx.ExecContext(ctx, "UPDATE x SET y = ?", 1)
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.Equal(t, mockResult, res)
+		assert.True(t, receivedCanceledContext)
+	})
+
+	t.Run("QueryContextFnReceivesContext", func(t *testing.T) {
+		receivedCanceledContext := false
+		dbctx := &DBContext{
+			QueryContextFn: func(c context.Context, query string, args ...any) (*sql.Rows, error) {
+				receivedCanceledContext = c.Err() == context.Canceled
+				assert.Equal(t, "SELECT * FROM x WHERE id = ?", query)
+				assert.Equal(t, []any{7}, args)
+				return nil, c.Err()
+			},
+		}
+
+		rows, err := dbctx.QueryContext(ctx, "SELECT * FROM x WHERE id = ?", 7)
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.Nil(t, rows)
+		assert.True(t, receivedCanceledContext)
+	})
+}
+
+func TestDBContext_PublicWrappersAndTxContextBranches(t *testing.T) {
+	mockResult := new(MockResult)
+	stmt := new(sql.Stmt)
+	rows := new(sql.Rows)
+
+	t.Run("ExecFallsBackToContextPath", func(t *testing.T) {
+		tx := new(MockTx)
+		tx.On("Exec", "exec-wrapper", []any{1}).Return(mockResult, nil)
+
+		dbctx := &DBContext{Tx: tx}
+		res, err := dbctx.Exec("exec-wrapper", 1)
+		assert.NoError(t, err)
+		assert.Equal(t, mockResult, res)
+		tx.AssertExpectations(t)
+	})
+
+	t.Run("PrepareFallsBackToContextPath", func(t *testing.T) {
+		tx := new(MockTx)
+		tx.On("Prepare", "prepare-wrapper").Return(stmt, nil)
+
+		dbctx := &DBContext{Tx: tx}
+		got, err := dbctx.Prepare("prepare-wrapper")
+		assert.NoError(t, err)
+		assert.Equal(t, stmt, got)
+		tx.AssertExpectations(t)
+	})
+
+	t.Run("PrepareContextFnReceivesContext", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		receivedCanceledContext := false
+
+		dbctx := &DBContext{
+			PrepareContextFn: func(c context.Context, query string) (*sql.Stmt, error) {
+				receivedCanceledContext = c.Err() == context.Canceled
+				assert.Equal(t, "prepare-fn", query)
+				return stmt, c.Err()
+			},
+		}
+
+		got, err := dbctx.PrepareContext(ctx, "prepare-fn")
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.Equal(t, stmt, got)
+		assert.True(t, receivedCanceledContext)
+	})
+
+	t.Run("TxContextBranchesAcceptNilContext", func(t *testing.T) {
+		tx := new(MockTxContext)
+		tx.On("ExecContext", mock.Anything, "exec-context", []any{1}).Return(mockResult, nil)
+		tx.On("PrepareContext", mock.Anything, "prepare-context").Return(stmt, nil)
+		tx.On("QueryContext", mock.Anything, "query-context", []any{2}).Return(rows, nil)
+
+		dbctx := &DBContext{Tx: tx}
+		var nilCtx context.Context
+
+		res, err := dbctx.ExecContext(nilCtx, "exec-context", 1)
+		assert.NoError(t, err)
+		assert.Equal(t, mockResult, res)
+
+		gotStmt, err := dbctx.PrepareContext(nilCtx, "prepare-context")
+		assert.NoError(t, err)
+		assert.Equal(t, stmt, gotStmt)
+
+		gotRows, err := dbctx.QueryContext(nilCtx, "query-context", 2)
+		assert.NoError(t, err)
+		assert.Equal(t, rows, gotRows)
+
+		tx.AssertExpectations(t)
+	})
 }
 
 func TestDBContext_exec(t *testing.T) {

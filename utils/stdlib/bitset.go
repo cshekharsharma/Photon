@@ -67,7 +67,7 @@ func (bs *BitSet) Toggle(pos uint64) error {
 func (bs *BitSet) CountSetBits() uint64 {
 	var count uint64
 	for _, word := range bs.Bits {
-		count += uint64(popCount(word))
+		count += uint64(popCount(word)) // #nosec G115 -- popCount is in [0,64].
 	}
 	return count
 }

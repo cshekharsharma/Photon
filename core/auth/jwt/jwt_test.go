@@ -1,9 +1,13 @@
 package jwt
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"testing"
 	"time"
 
@@ -48,6 +52,47 @@ func TestSignAndVerify_ECDSA_Success(t *testing.T) {
 	v, ok := GetClaim(token, "sub")
 	assert.True(t, ok)
 	assert.Equal(t, "test", v)
+}
+
+func TestSignAndVerify_ECDSA_ES384Success(t *testing.T) {
+	es384PrivateKey, es384PublicKey := generateECDSAKeyPairForTest(t, elliptic.P384())
+
+	signature, err := SignECDSA(testFeed(), es384PrivateKey, "KID-ES384", SigningMethodES384)
+	assert.Nil(t, err)
+
+	valid, token, verifyErr := Verify(signature, VerifyConfig{
+		ECDSAPublicKeys:  map[string]string{"KID-ES384": es384PublicKey},
+		ExpectedIssuer:   "omega",
+		ExpectedAudience: "testing",
+	})
+
+	assert.True(t, valid)
+	assert.Nil(t, verifyErr)
+	assert.NotNil(t, token)
+	assert.Equal(t, SigningMethodES384.Alg(), token.Method.Alg())
+}
+
+func generateECDSAKeyPairForTest(t *testing.T, curve elliptic.Curve) (string, string) {
+	t.Helper()
+
+	privateKey, err := ecdsa.GenerateKey(curve, rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate ECDSA key: %v", err)
+	}
+
+	privateDER, err := x509.MarshalECPrivateKey(privateKey)
+	if err != nil {
+		t.Fatalf("failed to marshal private key: %v", err)
+	}
+	publicDER, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	if err != nil {
+		t.Fatalf("failed to marshal public key: %v", err)
+	}
+
+	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: privateDER})
+	publicPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})
+
+	return base64.StdEncoding.EncodeToString(privatePEM), base64.StdEncoding.EncodeToString(publicPEM)
 }
 
 func TestSignAndVerify_HMAC_Success(t *testing.T) {

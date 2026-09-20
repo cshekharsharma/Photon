@@ -44,12 +44,30 @@ func TestRedisLock_Success(t *testing.T) {
 	mockRedis.On("GetClient").Return(mockClient)
 	locker, _ := GetDistributedLocker(&LockOptions{LockerProvider: RedisLockProvider, StorageClient: mockRedis})
 
-	mockCmd := redisv9.NewBoolResult(true, nil)
-	mockClient.On("SetNX", mock.Anything, "mylock", mock.Anything, time.Second).Return(mockCmd)
+	mockCmd := redisv9.NewCmdResult(int64(7), nil)
+	mockClient.On("Eval", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(mockCmd)
 
-	ctx := context.Background()
-	err := locker.Lock(ctx, "mylock", time.Second, time.Millisecond*10)
+	token, err := locker.Lock(context.TODO(), "mylock", time.Second, time.Millisecond*10)
 	assert.NoError(t, err)
+	assert.Equal(t, uint64(7), token)
+
+	storedToken, ok := locker.FencingToken("mylock")
+	assert.True(t, ok)
+	assert.Equal(t, uint64(7), storedToken)
+}
+
+func TestRedisLock_ReturnsFencingToken(t *testing.T) {
+	mockClient := &mocks.MockRedisClient{}
+	mockRedis := &mockRedis{client: mockClient}
+	mockRedis.On("GetClient").Return(mockClient)
+	locker, _ := GetDistributedLocker(&LockOptions{LockerProvider: RedisLockProvider, StorageClient: mockRedis})
+
+	mockCmd := redisv9.NewCmdResult(int64(11), nil)
+	mockClient.On("Eval", mock.Anything, mock.Anything, []string{"mylock", "mylock:fence"}, mock.Anything).Return(mockCmd)
+
+	token, err := locker.Lock(context.Background(), "mylock", time.Second+time.Nanosecond, time.Millisecond*10)
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(11), token)
 }
 
 func TestRedisLock_WithStorageFailure(t *testing.T) {
@@ -58,11 +76,12 @@ func TestRedisLock_WithStorageFailure(t *testing.T) {
 	mockRedis.On("GetClient").Return(mockClient)
 	locker, _ := GetDistributedLocker(&LockOptions{LockerProvider: RedisLockProvider, StorageClient: mockRedis})
 
-	cmd := redisv9.NewBoolResult(false, errors.New("some error"))
-	mockClient.On("SetNX", mock.Anything, "mylock", mock.Anything, time.Second).Return(cmd)
+	cmd := redisv9.NewCmdResult(nil, errors.New("some error"))
+	mockClient.On("Eval", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(cmd)
 
 	ctx := context.Background()
-	err := locker.Lock(ctx, "mylock", time.Second, time.Millisecond*10)
+	token, err := locker.Lock(ctx, "mylock", time.Second, time.Millisecond*10)
+	assert.Zero(t, token)
 	assert.Error(t, err)
 }
 
@@ -72,14 +91,128 @@ func TestRedisLock_ContextTimeout(t *testing.T) {
 	mockRedis.On("GetClient").Return(mockClient) // Fix: Add this
 	locker, _ := GetDistributedLocker(&LockOptions{LockerProvider: RedisLockProvider, StorageClient: mockRedis})
 
-	mockCmd := redisv9.NewBoolResult(false, nil)
-	mockClient.On("SetNX", mock.Anything, "lockfail", mock.Anything, time.Second).Return(mockCmd)
+	mockCmd := redisv9.NewCmdResult(int64(0), nil)
+	mockClient.On("Eval", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(mockCmd)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	err := locker.Lock(ctx, "lockfail", time.Second, 10*time.Millisecond)
+	token, err := locker.Lock(ctx, "lockfail", time.Second, 10*time.Millisecond)
+	assert.Zero(t, token)
 	assert.Equal(t, ErrLockNotAcquired, err)
+}
+
+func TestRedisLock_InvalidExpiry(t *testing.T) {
+	locker := &RedisLocker{}
+
+	token, err := locker.Lock(context.Background(), "badlock", 0, time.Millisecond)
+
+	assert.Zero(t, token)
+	assert.EqualError(t, err, "lock expiry must be positive")
+}
+
+func TestRedisLock_UsesDefaultRetryIntervalAndConfiguredTimeout(t *testing.T) {
+	mockClient := &mocks.MockRedisClient{}
+	mockRedis := &mockRedis{client: mockClient}
+	mockRedis.On("GetClient").Return(mockClient)
+	locker, _ := GetDistributedLocker(&LockOptions{
+		LockerProvider:          RedisLockProvider,
+		StorageClient:           mockRedis,
+		DefaultLockRetryTimeout: 20 * time.Millisecond,
+	})
+
+	mockCmd := redisv9.NewCmdResult(int64(0), nil)
+	mockClient.On("Eval", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(mockCmd)
+
+	token, err := locker.Lock(context.Background(), "lockfail", time.Second, 0)
+
+	assert.Zero(t, token)
+	assert.Equal(t, ErrLockNotAcquired, err)
+}
+
+func TestRedisLock_UsesPackageDefaultTimeout(t *testing.T) {
+	origTimeout := defaultLockRetryTimeout
+	defaultLockRetryTimeout = 20 * time.Millisecond
+	defer func() { defaultLockRetryTimeout = origTimeout }()
+
+	mockClient := &mocks.MockRedisClient{}
+	mockRedis := &mockRedis{client: mockClient}
+	mockRedis.On("GetClient").Return(mockClient)
+	locker := &RedisLocker{storageclient: mockRedis}
+
+	mockCmd := redisv9.NewCmdResult(int64(0), nil)
+	mockClient.On("Eval", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(mockCmd)
+
+	token, err := locker.Lock(context.Background(), "lockfail", time.Second, time.Millisecond)
+
+	assert.Zero(t, token)
+	assert.Equal(t, ErrLockNotAcquired, err)
+}
+
+func TestRedisLock_UnexpectedTokenType(t *testing.T) {
+	mockClient := &mocks.MockRedisClient{}
+	mockRedis := &mockRedis{client: mockClient}
+	mockRedis.On("GetClient").Return(mockClient)
+	locker, _ := GetDistributedLocker(&LockOptions{LockerProvider: RedisLockProvider, StorageClient: mockRedis})
+
+	mockClient.On("Eval", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(redisv9.NewCmdResult("bad-token", nil))
+
+	token, err := locker.Lock(context.Background(), "mylock", time.Second, time.Millisecond)
+
+	assert.Zero(t, token)
+	assert.EqualError(t, err, "distributed lock acquisition failed for key 'mylock': unexpected result type from Eval")
+}
+
+func TestRedisLock_NegativeToken(t *testing.T) {
+	mockClient := &mocks.MockRedisClient{}
+	mockRedis := &mockRedis{client: mockClient}
+	mockRedis.On("GetClient").Return(mockClient)
+	locker, _ := GetDistributedLocker(&LockOptions{LockerProvider: RedisLockProvider, StorageClient: mockRedis})
+
+	mockClient.On("Eval", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(redisv9.NewCmdResult(int64(-1), nil))
+
+	token, err := locker.Lock(context.Background(), "mylock", time.Second, time.Millisecond)
+
+	assert.Zero(t, token)
+	assert.EqualError(t, err, "distributed lock acquisition failed for key 'mylock': unexpected negative fencing token")
+}
+
+func TestRedisFencingToken_NotHeldOrLegacyValue(t *testing.T) {
+	locker := &RedisLocker{}
+
+	token, ok := locker.FencingToken("missing")
+	assert.False(t, ok)
+	assert.Zero(t, token)
+
+	locker.lockStore.Store("legacy", "lockuuid")
+	token, ok = locker.FencingToken("legacy")
+	assert.False(t, ok)
+	assert.Zero(t, token)
+}
+
+func TestPositiveUint64NumericTypes(t *testing.T) {
+	token, err := positiveUint64(uint64(9))
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(9), token)
+
+	token, err = positiveUint64(3)
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(3), token)
+
+	token, err = positiveUint64(-1)
+	assert.Zero(t, token)
+	assert.EqualError(t, err, "unexpected negative fencing token")
+}
+
+func TestRedisUnlock_InvalidLocalState(t *testing.T) {
+	locker := &RedisLocker{}
+	locker.lockStore.Store("unlockkey", 123)
+
+	err := locker.Unlock(context.Background(), "unlockkey")
+
+	assert.Equal(t, ErrLockNotHeld, err)
 }
 
 func TestRedisUnlock_Success(t *testing.T) {
@@ -138,6 +271,41 @@ func TestRedisUnlock_EvalReturnsZero(t *testing.T) {
 	mockClient.On("Eval", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(cmd)
 
 	err := locker.Unlock(context.Background(), "unlockkey")
+	assert.Equal(t, ErrLockNotHeld, err)
+	_, ok := locker.(*RedisLocker).lockStore.Load("unlockkey")
+	assert.False(t, ok)
+}
+
+func TestRedisUnlock_UnexpectedEvalType(t *testing.T) {
+	mockClient := &mocks.MockRedisClient{}
+	mockRedis := &mockRedis{client: mockClient}
+	mockRedis.On("GetClient").Return(mockClient)
+	locker, _ := GetDistributedLocker(&LockOptions{LockerProvider: RedisLockProvider, StorageClient: mockRedis})
+
+	locker.(*RedisLocker).lockStore.Store("unlockkey", "lockuuid")
+
+	cmd := redisv9.NewCmd(context.Background())
+	cmd.SetVal("not-int64")
+	mockClient.On("Eval", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(cmd)
+
+	err := locker.Unlock(context.Background(), "unlockkey")
+	assert.EqualError(t, err, "unexpected result type from Eval")
+}
+
+func TestRedisExtend_InvalidExtension(t *testing.T) {
+	locker := &RedisLocker{}
+
+	err := locker.Extend(context.Background(), "extendkey", 0)
+
+	assert.EqualError(t, err, "lock extension must be positive")
+}
+
+func TestRedisExtend_InvalidLocalState(t *testing.T) {
+	locker := &RedisLocker{}
+	locker.lockStore.Store("extendkey", 123)
+
+	err := locker.Extend(context.Background(), "extendkey", time.Second)
+
 	assert.Equal(t, ErrLockNotHeld, err)
 }
 
@@ -212,6 +380,7 @@ func TestRedisExtend_Errors(t *testing.T) {
 	})
 
 	t.Run("ZeroReturnValue", func(t *testing.T) {
+		locker.(*RedisLocker).lockStore.Store("extendkey", "lockuuid")
 		cmd := redisv9.NewCmd(context.Background())
 		cmd.SetVal(int64(0))
 
@@ -219,5 +388,7 @@ func TestRedisExtend_Errors(t *testing.T) {
 
 		err := locker.Extend(context.Background(), "extendkey", 10*time.Second)
 		assert.Equal(t, ErrLockNotHeld, err)
+		_, ok := locker.(*RedisLocker).lockStore.Load("extendkey")
+		assert.False(t, ok)
 	})
 }

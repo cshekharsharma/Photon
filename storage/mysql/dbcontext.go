@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"context"
 	"database/sql"
 )
 
@@ -28,11 +29,20 @@ type DBContext struct {
 	// If set, it is invoked instead of the default internal logic.
 	ExecFn func(query string, args ...any) (sql.Result, error)
 
+	// ExecContextFn is an optional override for executing SQL statements with context.
+	ExecContextFn func(ctx context.Context, query string, args ...any) (sql.Result, error)
+
 	// PrepareFn is an optional override for preparing SQL statements.
 	PrepareFn func(query string) (*sql.Stmt, error)
 
+	// PrepareContextFn is an optional override for preparing SQL statements with context.
+	PrepareContextFn func(ctx context.Context, query string) (*sql.Stmt, error)
+
 	// QueryFn is an optional override for executing SQL queries that return rows.
 	QueryFn func(query string, args ...any) (*sql.Rows, error)
+
+	// QueryContextFn is an optional override for executing SQL queries with context.
+	QueryContextFn func(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
 // Exec executes a SQL statement (e.g., INSERT, UPDATE) within the context.
@@ -46,7 +56,15 @@ func (ctx *DBContext) Exec(query string, args ...any) (sql.Result, error) {
 	if ctx.ExecFn != nil {
 		return ctx.ExecFn(query, args...)
 	}
-	return ctx.exec(query, args...)
+	return ctx.execContext(context.Background(), query, args...)
+}
+
+// ExecContext executes a SQL statement (e.g., INSERT, UPDATE) with context.
+func (ctx *DBContext) ExecContext(c context.Context, query string, args ...any) (sql.Result, error) {
+	if ctx.ExecContextFn != nil {
+		return ctx.ExecContextFn(c, query, args...)
+	}
+	return ctx.execContext(c, query, args...)
 }
 
 // Prepare prepares a SQL statement within the context.
@@ -60,7 +78,15 @@ func (ctx *DBContext) Prepare(query string) (*sql.Stmt, error) {
 	if ctx.PrepareFn != nil {
 		return ctx.PrepareFn(query)
 	}
-	return ctx.prepare(query)
+	return ctx.prepareContext(context.Background(), query)
+}
+
+// PrepareContext prepares a SQL statement with context.
+func (ctx *DBContext) PrepareContext(c context.Context, query string) (*sql.Stmt, error) {
+	if ctx.PrepareContextFn != nil {
+		return ctx.PrepareContextFn(c, query)
+	}
+	return ctx.prepareContext(c, query)
 }
 
 // Query executes a SQL query that returns rows.
@@ -74,53 +100,91 @@ func (ctx *DBContext) Query(query string, args ...any) (*sql.Rows, error) {
 	if ctx.QueryFn != nil {
 		return ctx.QueryFn(query, args...)
 	}
-	return ctx.query(query, args...)
+	return ctx.queryContext(context.Background(), query, args...)
+}
+
+// QueryContext executes a SQL query that returns rows with context.
+func (ctx *DBContext) QueryContext(c context.Context, query string, args ...any) (*sql.Rows, error) {
+	if ctx.QueryContextFn != nil {
+		return ctx.QueryContextFn(c, query, args...)
+	}
+	return ctx.queryContext(c, query, args...)
 }
 
 // exec is the internal fallback for Exec(), used if ExecFn is nil.
 // It chooses Tx → Conn → Cluster-based connection in that order.
 func (ctx *DBContext) exec(query string, args ...any) (sql.Result, error) {
+	return ctx.execContext(context.Background(), query, args...)
+}
+
+func (ctx *DBContext) execContext(c context.Context, query string, args ...any) (sql.Result, error) {
+	if c == nil {
+		c = context.Background()
+	}
 	if ctx.Tx != nil {
+		if tx, ok := ctx.Tx.(TxContext); ok {
+			return tx.ExecContext(c, query, args...)
+		}
 		return ctx.Tx.Exec(query, args...)
 	}
 	if ctx.Conn != nil {
-		return ctx.Conn.Exec(query, args...)
+		return ctx.Conn.ExecContext(c, query, args...)
 	}
-	conn, err := Connect(helperMySqlConnector, ctx.Cluster)
+	conn, err := ConnectContext(c, helperMySqlConnector, ctx.Cluster)
 	if err != nil {
 		return nil, err
 	}
-	return conn.Exec(query, args...)
+	return conn.ExecContext(c, query, args...)
 }
 
 // prepare is the internal fallback for Prepare(), used if PrepareFn is nil.
 // It chooses Tx → Conn → Cluster-based connection in that order.
 func (ctx *DBContext) prepare(query string) (*sql.Stmt, error) {
+	return ctx.prepareContext(context.Background(), query)
+}
+
+func (ctx *DBContext) prepareContext(c context.Context, query string) (*sql.Stmt, error) {
+	if c == nil {
+		c = context.Background()
+	}
 	if ctx.Tx != nil {
+		if tx, ok := ctx.Tx.(TxContext); ok {
+			return tx.PrepareContext(c, query)
+		}
 		return ctx.Tx.Prepare(query)
 	}
 	if ctx.Conn != nil {
-		return ctx.Conn.Prepare(query)
+		return ctx.Conn.PrepareContext(c, query)
 	}
-	conn, err := Connect(helperMySqlConnector, ctx.Cluster)
+	conn, err := ConnectContext(c, helperMySqlConnector, ctx.Cluster)
 	if err != nil {
 		return nil, err
 	}
-	return conn.Prepare(query)
+	return conn.PrepareContext(c, query)
 }
 
 // query is the internal fallback for Query(), used if QueryFn is nil.
 // It chooses Tx → Conn → Cluster-based connection in that order.
 func (ctx *DBContext) query(query string, args ...any) (*sql.Rows, error) {
+	return ctx.queryContext(context.Background(), query, args...)
+}
+
+func (ctx *DBContext) queryContext(c context.Context, query string, args ...any) (*sql.Rows, error) {
+	if c == nil {
+		c = context.Background()
+	}
 	if ctx.Tx != nil {
+		if tx, ok := ctx.Tx.(TxContext); ok {
+			return tx.QueryContext(c, query, args...)
+		}
 		return ctx.Tx.Query(query, args...)
 	}
 	if ctx.Conn != nil {
-		return ctx.Conn.Query(query, args...)
+		return ctx.Conn.QueryContext(c, query, args...)
 	}
-	conn, err := Connect(helperMySqlConnector, ctx.Cluster)
+	conn, err := ConnectContext(c, helperMySqlConnector, ctx.Cluster)
 	if err != nil {
 		return nil, err
 	}
-	return conn.Query(query, args...)
+	return conn.QueryContext(c, query, args...)
 }

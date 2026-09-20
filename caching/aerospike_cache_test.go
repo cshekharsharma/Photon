@@ -1,8 +1,11 @@
 package caching
 
 import (
+	"context"
 	"errors"
+	"math"
 	"testing"
+	"time"
 
 	aerov8 "github.com/aerospike/aerospike-client-go/v8"
 	aero8type "github.com/aerospike/aerospike-client-go/v8/types"
@@ -143,6 +146,33 @@ func TestAerospikeNewAerospikeCache_ConnectError(t *testing.T) {
 	}
 }
 
+func TestAerospikeTTLRangeValidation(t *testing.T) {
+	mockedConnector := new(mockedAerospikeConnector)
+	_, err := NewAerospikeCache(&Options{
+		Provider:    ProviderAerospike,
+		Cluster:     "test-cluster-bigttl",
+		Namespace:   "test-ns",
+		Collection:  "test-collection",
+		Hosts:       []string{"127.0.0.1:3000"},
+		ConnTimeout: 5,
+		DefaultTTL:  int64(math.MaxUint32) + 1,
+	}, mockedConnector)
+	if err == nil {
+		t.Fatalf("expected out-of-range default TTL error")
+	}
+
+	cache, _ := getMockedAerospikeCache(t)
+	if _, err := cache.Set(&SetRequest{Key: "k", Fields: map[string]any{"a": 1}, TTL: int64(math.MaxUint32) + 1}); err == nil {
+		t.Fatalf("expected out-of-range Set TTL error")
+	}
+	if _, err := cache.MultiSet(&MultiSetRequest{FieldsMap: map[string]map[string]any{"k": {"a": 1}}, TTL: int64(math.MaxUint32) + 1}); err == nil {
+		t.Fatalf("expected out-of-range MultiSet TTL error")
+	}
+	if err := cache.SetTTL(&SetTTLRequest{Key: "k", TTL: int64(math.MaxUint32) + 1}); err == nil {
+		t.Fatalf("expected out-of-range SetTTL error")
+	}
+}
+
 func TestAerospikeKeyCreationErrors(t *testing.T) {
 	cache, _ := getMockedAerospikeCache(t)
 
@@ -194,6 +224,97 @@ func TestAerospikeNewMultipleKeyErrors(t *testing.T) {
 
 	_, err = cache.MultiDelete(&MultiDeleteRequest{Keys: []string{"k1"}})
 	assert.Error(t, err)
+}
+
+func TestAerospikeContextMethodsCanceled(t *testing.T) {
+	cache, mockClient := getMockedAerospikeCache(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	request := cacheRequest{Namespace: "test-ns", Collection: "test-collection"}
+
+	calls := []struct {
+		name string
+		run  func() error
+	}{
+		{"Exists", func() error {
+			_, err := cache.ExistsContext(ctx, &ExistsRequest{cacheRequest: request, Key: "k"})
+			return err
+		}},
+		{"Get", func() error {
+			_, err := cache.GetContext(ctx, &GetRequest{cacheRequest: request, Key: "k"})
+			return err
+		}},
+		{"Set", func() error {
+			_, err := cache.SetContext(ctx, &SetRequest{cacheRequest: request, Key: "k", Fields: map[string]any{"f": "v"}})
+			return err
+		}},
+		{"Delete", func() error {
+			_, err := cache.DeleteContext(ctx, &DeleteRequest{cacheRequest: request, Key: "k"})
+			return err
+		}},
+		{"MultiGet", func() error {
+			_, err := cache.MultiGetContext(ctx, &MultiGetRequest{cacheRequest: request, Keys: []string{"k"}})
+			return err
+		}},
+		{"MultiSet", func() error {
+			_, err := cache.MultiSetContext(ctx, &MultiSetRequest{cacheRequest: request, FieldsMap: map[string]map[string]any{"k": {"f": "v"}}})
+			return err
+		}},
+		{"MultiDelete", func() error {
+			_, err := cache.MultiDeleteContext(ctx, &MultiDeleteRequest{cacheRequest: request, Keys: []string{"k"}})
+			return err
+		}},
+		{"Increment", func() error {
+			return cache.IncrementContext(ctx, &IncrementRequest{cacheRequest: request, Key: "k", Fields: map[string]int64{"f": 1}})
+		}},
+		{"Decrement", func() error {
+			return cache.DecrementContext(ctx, &DecrementRequest{cacheRequest: request, Key: "k", Fields: map[string]int64{"f": 1}})
+		}},
+		{"Append", func() error {
+			return cache.AppendContext(ctx, &AppendRequest{cacheRequest: request, Key: "k", Fields: map[string]string{"f": "v"}})
+		}},
+		{"GetTTL", func() error {
+			_, err := cache.GetTTLContext(ctx, &GetTTLRequest{cacheRequest: request, Key: "k"})
+			return err
+		}},
+		{"SetTTL", func() error {
+			return cache.SetTTLContext(ctx, &SetTTLRequest{cacheRequest: request, Key: "k", TTL: 1})
+		}},
+	}
+
+	for _, tc := range calls {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.ErrorIs(t, tc.run(), context.Canceled)
+		})
+	}
+	assert.Empty(t, mockClient.Calls)
+}
+
+func TestAerospikePoliciesUseContextDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	readPolicy := aerospikeReadPolicyForContext(ctx)
+	assert.Positive(t, readPolicy.TotalTimeout)
+	assert.LessOrEqual(t, readPolicy.SocketTimeout, readPolicy.TotalTimeout)
+
+	batchPolicy := aerospikeBatchPolicyForContext(ctx)
+	assert.Positive(t, batchPolicy.TotalTimeout)
+	assert.LessOrEqual(t, batchPolicy.SocketTimeout, batchPolicy.TotalTimeout)
+
+	writePolicy := aerospikeWritePolicyForContext(ctx, "missing-cluster", 10)
+	assert.Positive(t, writePolicy.TotalTimeout)
+	assert.LessOrEqual(t, writePolicy.SocketTimeout, writePolicy.TotalTimeout)
+
+	expiredPolicy := aerov8.NewPolicy()
+	expiredCtx, expiredCancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer expiredCancel()
+	applyAerospikeDeadline(expiredCtx, expiredPolicy)
+	assert.Equal(t, time.Nanosecond, expiredPolicy.TotalTimeout)
+	assert.Equal(t, time.Nanosecond, expiredPolicy.SocketTimeout)
+
+	applyAerospikeDeadline(ctx, nil)
 }
 
 func TestAerospikeMultiSet_KeyCreationError(t *testing.T) {

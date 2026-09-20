@@ -1,6 +1,6 @@
 module github.com/cshekharsharma/photon
 
-go 1.26.0
+go 1.27.1
 
 require (
 	github.com/aerospike/aerospike-client-go/v8 v8.8.0

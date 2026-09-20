@@ -139,7 +139,7 @@ func VerifyECDSA(tokenString string, cfg VerifyConfig) (bool, *jwt.Token, error)
 	return verifyWithConfig(
 		tokenString,
 		cfg,
-		[]string{SigningMethodES256.Alg(), SigningMethodES512.Alg()},
+		[]string{SigningMethodES256.Alg(), SigningMethodES384.Alg(), SigningMethodES512.Alg()},
 		func(token *jwt.Token) (interface{}, error) {
 			kidKey, err := tokenKID(token)
 			if err != nil {

@@ -13,7 +13,9 @@ Photon is a lightweight Go service toolkit for building production backends with
 
 It gives teams a common foundation for HTTP and gRPC services, configuration, logging, telemetry, storage clients, cloud integrations, middleware, background workers, caching, and resilience utilities. The goal is not to hide Go behind a heavy framework. The goal is to keep normal Go code simple, observable, and consistent across services.
 
-![Photon Logo](./docs/assets/photon.png)
+<p align="center">
+  <img src="./docs/assets/photon.png" alt="Photon Logo" width="300">
+</p>
 
 ## What Photon Is Good For
 
@@ -44,7 +46,7 @@ It gives teams a common foundation for HTTP and gRPC services, configuration, lo
 Photon targets modern Go and currently declares:
 
 ```text
-go 1.26
+go 1.27.1
 ```
 
 Install it with:

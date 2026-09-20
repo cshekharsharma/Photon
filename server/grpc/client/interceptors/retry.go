@@ -38,7 +38,13 @@ func RetryInterceptor(maxRetries int) grpc.UnaryClientInterceptor {
 			switch st.Code() {
 			case codes.Unavailable, codes.ResourceExhausted, codes.DeadlineExceeded:
 				if i < maxRetries {
-					time.Sleep(backoff)
+					timer := time.NewTimer(backoff)
+					select {
+					case <-ctx.Done():
+						timer.Stop()
+						return ctx.Err()
+					case <-timer.C:
+					}
 					backoff *= 2 // Exponential backoff
 					continue
 				}

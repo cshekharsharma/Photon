@@ -32,7 +32,7 @@ func (sh *shard) removeLocked(key string) {
 	sh.lru.Delete(key)
 
 	if record != nil {
-		sh.currentSize -= uint64(record.size)
+		sh.currentSize -= nonNegativeInt64ToUint64(record.size)
 	}
 }
 

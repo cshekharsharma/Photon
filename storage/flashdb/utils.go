@@ -45,7 +45,8 @@ func addInt(cur any, delta int64) (any, bool) {
 		if delta < 0 && int64(x) < int64(math.MinInt32)-delta {
 			return nil, false
 		}
-		return int32(int64(x) + delta), true
+		next, ok := int64ToInt32(int64(x) + delta)
+		return next, ok
 
 	case int64:
 		// int64 add is exact in Go; we still detect overflow via bounds if desired,

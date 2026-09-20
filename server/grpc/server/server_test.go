@@ -127,6 +127,7 @@ func TestStartGRPCServer_BindError(t *testing.T) {
 	}()
 
 	opts := &ServerOptions{
+		Insecure:     true,
 		Port:         12346,
 		ServerLogger: getLogger("TestStartGRPCServer_BindError"),
 	}
@@ -134,6 +135,69 @@ func TestStartGRPCServer_BindError(t *testing.T) {
 	err = StartGRPCServer(opts)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to listen")
+}
+
+func TestStartGRPCServer_RejectsAccidentalInsecureDefault(t *testing.T) {
+	err := StartGRPCServer(&ServerOptions{
+		Port:         12348,
+		ServerLogger: getLogger("TestStartGRPCServer_RejectsAccidentalInsecureDefault"),
+	})
+	assert.EqualError(t, err, "gRPC server requires TLSConfig unless Insecure is true")
+}
+
+func TestStartGRPCServer_RejectsProductionReflection(t *testing.T) {
+	err := StartGRPCServerContext(context.TODO(), &ServerOptions{
+		Port:             12349,
+		Insecure:         true,
+		EnableReflection: true,
+		Environment:      ProductionEnvironment,
+		ServerLogger:     getLogger("TestStartGRPCServer_RejectsProductionReflection"),
+	})
+	assert.EqualError(t, err, "gRPC reflection requires AllowReflectionInProduction in production")
+}
+
+func TestStartGRPCServer_AllowsProductionReflectionWithOptIn(t *testing.T) {
+	origServe := grpcServeFn
+	defer func() { grpcServeFn = origServe }()
+
+	grpcServeFn = func(server *grpc.Server, lis net.Listener) error {
+		assert.NoError(t, lis.Close())
+		return errors.New("serve failed")
+	}
+
+	err := StartGRPCServerContext(context.Background(), &ServerOptions{
+		Port:                        12350,
+		Insecure:                    true,
+		EnableReflection:            true,
+		Environment:                 " production ",
+		AllowReflectionInProduction: true,
+		ServerLogger:                getLogger("TestStartGRPCServer_AllowsProductionReflectionWithOptIn"),
+	})
+	assert.EqualError(t, err, "gRPC server error: serve failed")
+}
+
+func TestStartGRPCServer_ContextShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var shutdownCalled atomic.Bool
+
+	done := make(chan error, 1)
+	go func() {
+		done <- StartGRPCServerContext(ctx, &ServerOptions{
+			Port:            12351,
+			Insecure:        true,
+			ShutdownTimeout: 500 * time.Millisecond,
+			ShutdownHook: func() {
+				shutdownCalled.Store(true)
+			},
+			ServerLogger: getLogger("TestStartGRPCServer_ContextShutdown"),
+		})
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	assert.NoError(t, <-done)
+	assert.True(t, shutdownCalled.Load(), "ShutdownHook should have been called")
 }
 
 func TestStopGracefully_TimesOut(t *testing.T) {
@@ -157,6 +221,7 @@ func TestStartGRPCServer_ReturnsServeError(t *testing.T) {
 	}
 
 	opts := &ServerOptions{
+		Insecure:     true,
 		Port:         12347,
 		ServerLogger: getLogger("TestStartGRPCServer_ReturnsServeError"),
 	}
@@ -164,6 +229,23 @@ func TestStartGRPCServer_ReturnsServeError(t *testing.T) {
 	err := StartGRPCServer(opts)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "gRPC server error: serve failed")
+}
+
+func TestStartGRPCServer_IgnoresServerStopped(t *testing.T) {
+	origServe := grpcServeFn
+	defer func() { grpcServeFn = origServe }()
+
+	grpcServeFn = func(server *grpc.Server, lis net.Listener) error {
+		assert.NoError(t, lis.Close())
+		return grpc.ErrServerStopped
+	}
+
+	err := StartGRPCServerContext(context.Background(), &ServerOptions{
+		Insecure:     true,
+		Port:         12352,
+		ServerLogger: getLogger("TestStartGRPCServer_IgnoresServerStopped"),
+	})
+	assert.NoError(t, err)
 }
 
 func generateSelfSignedTLS(t *testing.T) (certPath, keyPath string) {

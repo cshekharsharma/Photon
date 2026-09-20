@@ -84,6 +84,21 @@ func TestAddInt_Int32_Overflow(t *testing.T) {
 	}
 }
 
+func TestNumericConversionHelpers(t *testing.T) {
+	if got := nonNegativeInt64ToUint64(-1); got != 0 {
+		t.Fatalf("negative size should clamp to 0, got %d", got)
+	}
+	if got := nonNegativeInt64ToUint64(7); got != 7 {
+		t.Fatalf("positive size = %d, want 7", got)
+	}
+	if _, ok := int64ToInt32(int64(math.MaxInt32) + 1); ok {
+		t.Fatalf("expected int32 conversion failure")
+	}
+	if got, ok := int64ToInt32(12); !ok || got != 12 {
+		t.Fatalf("int32 conversion = %d,%v; want 12,true", got, ok)
+	}
+}
+
 func TestAddInt_Int64_OK(t *testing.T) {
 	v, ok := addInt(int64(7), 3)
 	if !ok || v.(int64) != 10 {

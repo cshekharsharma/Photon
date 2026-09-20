@@ -36,6 +36,31 @@ func TestOptions_Validate(t *testing.T) {
 			wantErr: errors.New("logger is required"),
 		},
 		{
+			name: "insecure tls without explicit opt-in",
+			opts: &Options{
+				Provider: ProviderConsul,
+				Address:  "localhost:8500",
+				Logger:   validLogger,
+				TLSConfig: &TLSConfig{
+					InsecureSkipVerify: true,
+				},
+			},
+			wantErr: errors.New("insecure TLS verification requires AllowInsecureTLS"),
+		},
+		{
+			name: "insecure tls with explicit opt-in",
+			opts: &Options{
+				Provider: ProviderConsul,
+				Address:  "localhost:8500",
+				Logger:   validLogger,
+				TLSConfig: &TLSConfig{
+					InsecureSkipVerify: true,
+					AllowInsecureTLS:   true,
+				},
+			},
+			wantErr: nil,
+		},
+		{
 			name:    "all valid",
 			opts:    &Options{Provider: ProviderConsul, Address: "localhost:8500", Logger: validLogger},
 			wantErr: nil,

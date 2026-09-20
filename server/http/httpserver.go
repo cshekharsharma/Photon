@@ -41,7 +41,7 @@ type HTTPServer struct {
 
 var (
 	startOverseerFunc = workers.StartOverseer
-	minimumGoVersion  = "go1.25.0"
+	minimumGoVersion  = "go1.27.1"
 
 	startHttpServerFn = startHttpServer
 
@@ -446,9 +446,9 @@ func startHttpServer(server *HTTPServer) {
 			return
 		}
 		if sessionErr := server.closeOwnedSession(); sessionErr != nil {
-			serverconfig.ServerLogger.Fatal("Error closing session manager: %v", sessionErr)
+			serverconfig.ServerLogger.Error("Error closing session manager: %v", sessionErr)
 		}
-		serverconfig.ServerLogger.Fatal("%v", err)
+		serverconfig.ServerLogger.Error("%v", err)
 		panicFn(fmt.Sprintf("%v", err))
 		return
 	case receivedSignal = <-shutdownChan:
@@ -471,7 +471,7 @@ func startHttpServer(server *HTTPServer) {
 	defer cancel()
 
 	if err := server.Shutdown(ctx); err != nil {
-		serverconfig.ServerLogger.Fatal("Error shutting down server: %v", err)
+		serverconfig.ServerLogger.Error("Error shutting down server: %v", err)
 	}
 
 	serverconfig.ServerLogger.Info("Server gracefully stopped.")

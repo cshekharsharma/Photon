@@ -165,22 +165,22 @@ func MaxInt64(a, b int64) int64 {
 }
 
 func PackNumbers(num1 int32, num2 int32) int64 {
-	return (int64(int32(num1)) << 32) | int64(uint32(num2))
+	return (int64(num1) << 32) | int64(uint32(num2)) // #nosec G115 -- intentional two's-complement bit packing.
 }
 
 // Unpack both numbers from the packed uint64
 func UnpackNumbers(packed int64) (int32, int32) {
-	num1 := int32(packed >> 32)
-	num2 := int32(packed & 0xFFFFFFFF)
+	num1 := int32(packed >> 32)        // #nosec G115 -- inverse of PackNumbers.
+	num2 := int32(packed & 0xFFFFFFFF) // #nosec G115 -- inverse of PackNumbers.
 	return num1, num2
 }
 
 // Get only the first number from the packed uint64
 func UnpackFirstNumber(packed int64) int32 {
-	return int32(packed >> 32)
+	return int32(packed >> 32) // #nosec G115 -- inverse of PackNumbers.
 }
 
 // Get only the second number from the packed uint64
 func UnpackSecondNumber(packed int64) int32 {
-	return int32(packed & 0xFFFFFFFF)
+	return int32(packed & 0xFFFFFFFF) // #nosec G115 -- inverse of PackNumbers.
 }

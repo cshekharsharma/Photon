@@ -48,7 +48,7 @@ func (mdb *MockedMySqlDb) Prepare(query string) (*sql.Stmt, error) {
 }
 
 func (mdb *MockedMySqlDb) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
-	return nil, nil
+	return mdb.Exec(query, args...)
 }
 
 func (mdb *MockedMySqlDb) Query(query string, args ...interface{}) (*sql.Rows, error) {
@@ -63,7 +63,7 @@ func (mdb *MockedMySqlDb) Query(query string, args ...interface{}) (*sql.Rows, e
 }
 
 func (mdb *MockedMySqlDb) QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
-	return nil, nil
+	return mdb.Query(query, args...)
 }
 
 func (mdb *MockedMySqlDb) QueryRow(query string, args ...interface{}) *sql.Row {
@@ -95,7 +95,7 @@ func (mdb *MockedMySqlDb) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sq
 }
 
 func (mdb *MockedMySqlDb) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
-	return nil, nil
+	return mdb.Prepare(query)
 }
 
 func (mdb *MockedMySqlDb) Driver() driver.Driver {

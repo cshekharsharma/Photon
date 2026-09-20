@@ -42,13 +42,24 @@ func TestNewRESTClient_ValidationAndDefaults(t *testing.T) {
 	if _, err := NewRESTClient(&ConnectionConfig{BaseURL: "example.com"}); err == nil {
 		t.Fatalf("expected error for invalid BaseURL")
 	}
+	badURLs := []string{
+		"ftp://example.com",
+		"http://user:pass@example.com",
+		"http://example.com?q=1",
+		"http://example.com#frag",
+	}
+	for _, raw := range badURLs {
+		if _, err := NewRESTClient(&ConnectionConfig{BaseURL: raw}); err == nil {
+			t.Fatalf("expected error for unsafe BaseURL %q", raw)
+		}
+	}
 
-	cfg := &ConnectionConfig{BaseURL: "http://example.com/", RetryJitter: 2}
+	cfg := &ConnectionConfig{BaseURL: "http://example.com/api/", RetryJitter: 2}
 	c, err := NewRESTClient(cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if c.baseURL != "http://example.com" {
+	if c.baseURL != "http://example.com/api" {
 		t.Fatalf("expected baseURL trimmed, got %q", c.baseURL)
 	}
 	if c.retryJitter != 0.2 {
@@ -56,6 +67,34 @@ func TestNewRESTClient_ValidationAndDefaults(t *testing.T) {
 	}
 	if c.httpClient.Timeout <= 0 {
 		t.Fatalf("expected default timeout")
+	}
+	got, err := c.requestURL("/collections/test?wait=true")
+	if err != nil {
+		t.Fatalf("requestURL: %v", err)
+	}
+	if got != "http://example.com/api/collections/test?wait=true" {
+		t.Fatalf("unexpected request URL: %s", got)
+	}
+	if _, err := c.requestURL("relative"); err == nil {
+		t.Fatalf("expected relative path error")
+	}
+}
+
+func TestRESTClient_RedirectPolicy(t *testing.T) {
+	c, err := NewRESTClient(&ConnectionConfig{BaseURL: "https://example.com"})
+	if err != nil {
+		t.Fatalf("NewRESTClient: %v", err)
+	}
+
+	sameHostReq, _ := http.NewRequest(http.MethodGet, "https://example.com/next", nil)
+	firstReq, _ := http.NewRequest(http.MethodGet, "https://example.com/start", nil)
+	if err := c.httpClient.CheckRedirect(sameHostReq, []*http.Request{firstReq}); err != nil {
+		t.Fatalf("expected same-host redirect to be allowed: %v", err)
+	}
+
+	otherHostReq, _ := http.NewRequest(http.MethodGet, "https://other.example/next", nil)
+	if err := c.httpClient.CheckRedirect(otherHostReq, []*http.Request{firstReq}); !errors.Is(err, http.ErrUseLastResponse) {
+		t.Fatalf("expected cross-host redirect to stop, got %v", err)
 	}
 }
 
@@ -423,8 +462,20 @@ func TestDoJSON_StatusRetryThenSuccess(t *testing.T) {
 
 func TestDoJSON_RequestBuildError(t *testing.T) {
 	c := &restClient{baseURL: "http://example.com", httpClient: &http.Client{}, retryMaxAttempts: 1}
-	if err := c.doJSON(context.Background(), http.MethodGet, "/%", nil, nil); err == nil {
+	if err := c.doJSON(context.Background(), http.MethodGet, "relative", nil, nil); err == nil {
 		t.Fatalf("expected request build error")
+	}
+}
+
+func TestNewRequest_ErrorBranches(t *testing.T) {
+	c := &restClient{baseURL: "://bad"}
+	if _, err := c.newRequest(context.Background(), http.MethodGet, "/x", nil, false); err == nil {
+		t.Fatalf("expected invalid base URL error")
+	}
+
+	c.baseURL = "http://example.com"
+	if _, err := c.newRequest(context.Background(), "\n", "/x", nil, false); err == nil {
+		t.Fatalf("expected invalid method error")
 	}
 }
 

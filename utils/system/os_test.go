@@ -2,12 +2,19 @@ package system
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
+
+func TestUintptrToInt64Overflow(t *testing.T) {
+	if got := uintptrToInt64(uintptr(math.MaxUint)); got != math.MaxInt64 {
+		t.Fatalf("expected MaxInt64 clamp, got %d", got)
+	}
+}
 
 func TestGetSizeInBytes(t *testing.T) {
 	type SampleStruct struct {

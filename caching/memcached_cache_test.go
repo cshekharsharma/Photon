@@ -1,8 +1,10 @@
 package caching
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/bradfitz/gomemcache/memcache"
@@ -144,6 +146,26 @@ func TestMemcachedSet_SerialiseError(t *testing.T) {
 	success, err := cache.Set(&SetRequest{Key: "key", Value: "val"})
 	assert.Error(t, err)
 	assert.False(t, success)
+}
+
+func TestMemcachedNumericRangeValidation(t *testing.T) {
+	cache, _ := setupTestCache(t)
+
+	if ok, err := cache.Set(&SetRequest{Key: "key", Value: "val", TTL: int64(math.MaxInt32) + 1}); err == nil || ok {
+		t.Fatalf("expected out-of-range Set TTL to fail, ok=%v err=%v", ok, err)
+	}
+	if _, err := cache.MultiSet(&MultiSetRequest{ValueMap: map[string]any{"k": "v"}, TTL: -1}); err == nil {
+		t.Fatalf("expected negative MultiSet TTL to fail")
+	}
+	if err := cache.Increment(&IncrementRequest{Key: "key", Value: -1}); err == nil {
+		t.Fatalf("expected negative increment to fail")
+	}
+	if err := cache.Decrement(&DecrementRequest{Key: "key", Value: -1}); err == nil {
+		t.Fatalf("expected negative decrement to fail")
+	}
+	if err := cache.SetTTL(&SetTTLRequest{Key: "key", TTL: int64(math.MaxInt32) + 1}); err == nil {
+		t.Fatalf("expected out-of-range SetTTL to fail")
+	}
 }
 
 func TestMemcachedDelete_Success(t *testing.T) {
@@ -293,6 +315,76 @@ func TestMemcachedGetTTL_Unsupported(t *testing.T) {
 	_, err := cache.GetTTL(&GetTTLRequest{Key: "key"})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "GetTTL not supported")
+}
+
+func TestMemcachedContextMethodsCanceled(t *testing.T) {
+	backend := new(MockMemcached)
+	cache := &MemcachedCache{
+		memc:       backend,
+		namespace:  "test-ns",
+		collection: "test-coll",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	request := cacheRequest{Namespace: "test-ns", Collection: "test-coll"}
+
+	calls := []struct {
+		name string
+		run  func() error
+	}{
+		{"Exists", func() error {
+			_, err := cache.ExistsContext(ctx, &ExistsRequest{cacheRequest: request, Key: "k"})
+			return err
+		}},
+		{"Get", func() error {
+			_, err := cache.GetContext(ctx, &GetRequest{cacheRequest: request, Key: "k"})
+			return err
+		}},
+		{"Set", func() error {
+			_, err := cache.SetContext(ctx, &SetRequest{cacheRequest: request, Key: "k", Value: "v"})
+			return err
+		}},
+		{"Delete", func() error {
+			_, err := cache.DeleteContext(ctx, &DeleteRequest{cacheRequest: request, Key: "k"})
+			return err
+		}},
+		{"MultiGet", func() error {
+			_, err := cache.MultiGetContext(ctx, &MultiGetRequest{cacheRequest: request, Keys: []string{"k"}})
+			return err
+		}},
+		{"MultiSet", func() error {
+			_, err := cache.MultiSetContext(ctx, &MultiSetRequest{cacheRequest: request, ValueMap: map[string]any{"k": "v"}})
+			return err
+		}},
+		{"MultiDelete", func() error {
+			_, err := cache.MultiDeleteContext(ctx, &MultiDeleteRequest{cacheRequest: request, Keys: []string{"k"}})
+			return err
+		}},
+		{"Increment", func() error {
+			return cache.IncrementContext(ctx, &IncrementRequest{cacheRequest: request, Key: "k", Value: 1})
+		}},
+		{"Decrement", func() error {
+			return cache.DecrementContext(ctx, &DecrementRequest{cacheRequest: request, Key: "k", Value: 1})
+		}},
+		{"Append", func() error {
+			return cache.AppendContext(ctx, &AppendRequest{cacheRequest: request, Key: "k", Value: "v"})
+		}},
+		{"GetTTL", func() error {
+			_, err := cache.GetTTLContext(ctx, &GetTTLRequest{cacheRequest: request, Key: "k"})
+			return err
+		}},
+		{"SetTTL", func() error {
+			return cache.SetTTLContext(ctx, &SetTTLRequest{cacheRequest: request, Key: "k", TTL: 1})
+		}},
+	}
+
+	for _, tc := range calls {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.ErrorIs(t, tc.run(), context.Canceled)
+		})
+	}
+	backend.AssertNotCalled(t, "GetClient")
 }
 
 func TestMemcachedSetTTL_Success(t *testing.T) {

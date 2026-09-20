@@ -13,13 +13,15 @@ import (
 )
 
 type testWorker struct {
-	name      string
-	id        string
-	execErr   error
-	runCount  *atomic.Int32
-	signalRun chan struct{}
-	runErr    error
-	panicRun  bool
+	name          string
+	id            string
+	execErr       error
+	runCount      *atomic.Int32
+	signalRun     chan struct{}
+	runErr        error
+	panicRun      bool
+	blockRun      chan struct{}
+	beatUntilDone bool
 }
 
 type panicIDWorker struct{}
@@ -57,6 +59,7 @@ type controlledPanicLogger struct {
 	panicOnInfo  atomic.Bool
 	panicOnWarn  atomic.Bool
 	panicOnError atomic.Bool
+	onWarn       func()
 }
 
 func (l *controlledPanicLogger) With(fields map[string]interface{}) logger.Logger { return l }
@@ -68,6 +71,9 @@ func (l *controlledPanicLogger) Info(message string, args ...interface{}) {
 	}
 }
 func (l *controlledPanicLogger) Warn(message string, args ...interface{}) {
+	if l.onWarn != nil {
+		l.onWarn()
+	}
 	if l.panicOnWarn.Load() {
 		panic("controlled warn panic")
 	}
@@ -91,6 +97,9 @@ func (l *controlledPanicLogger) InfoWithFields(fields map[string]interface{}, me
 	}
 }
 func (l *controlledPanicLogger) WarnWithFields(fields map[string]interface{}, message string, args ...interface{}) {
+	if l.onWarn != nil {
+		l.onWarn()
+	}
 	if l.panicOnWarn.Load() {
 		panic("controlled warn panic")
 	}
@@ -114,7 +123,7 @@ func (w *testWorker) GetWorkerExecutionErr() error {
 	return w.execErr
 }
 func (w *testWorker) SetWorkerExecutionErr(err error) { w.execErr = err }
-func (w *testWorker) Run(_ chan<- WorkerInterface) error {
+func (w *testWorker) Run(runtime WorkerRuntime) error {
 	if w.panicRun {
 		panic("boom")
 	}
@@ -127,15 +136,30 @@ func (w *testWorker) Run(_ chan<- WorkerInterface) error {
 		default:
 		}
 	}
+	if w.beatUntilDone {
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-runtime.Done():
+				return runtime.Err()
+			case <-ticker.C:
+				runtime.Beat()
+			}
+		}
+	}
+	if w.blockRun != nil {
+		<-w.blockRun
+	}
 	return w.runErr
 }
 
-func (w *panicIDWorker) GetWorkerName() string              { return "panic-id-worker" }
-func (w *panicIDWorker) GetWorkerId() string                { panic("panic getting worker id") }
-func (w *panicIDWorker) SetWorkerId(id string)              {}
-func (w *panicIDWorker) GetWorkerExecutionErr() error       { return nil }
-func (w *panicIDWorker) SetWorkerExecutionErr(err error)    {}
-func (w *panicIDWorker) Run(_ chan<- WorkerInterface) error { return nil }
+func (w *panicIDWorker) GetWorkerName() string           { return "panic-id-worker" }
+func (w *panicIDWorker) GetWorkerId() string             { panic("panic getting worker id") }
+func (w *panicIDWorker) SetWorkerId(id string)           {}
+func (w *panicIDWorker) GetWorkerExecutionErr() error    { return nil }
+func (w *panicIDWorker) SetWorkerExecutionErr(err error) {}
+func (w *panicIDWorker) Run(WorkerRuntime) error         { return nil }
 
 func getTestLogger() logger.Logger {
 	return logger.Init(&logger.LoggerConfig{
@@ -152,6 +176,7 @@ func resetWorkerTestState() {
 	workerList = nil
 	workerChan = nil
 	workerConfigByID = nil
+	workerByID = nil
 	workerRestartHistory = nil
 	workerFailureSignalSeen = nil
 	workerStatuses = nil
@@ -160,13 +185,17 @@ func resetWorkerTestState() {
 	workerChanInitializedHook = nil
 	executeOverseerDoneHook = nil
 	overseerTestHookMu.Unlock()
+	restartTimestampsMu.Lock()
 	restartTimestamps = nil
+	restartTimestampsMu.Unlock()
 	workerRestartLimit = 10
 	workerRestartWindow = 60 * time.Second
 	workerRestartBackoff = 500 * time.Millisecond
 	workerRestartBackoffM = 30 * time.Second
 	workerFailureSignalTTL = 2 * time.Minute
 	SetOverseerSleepTimeout(time.Second)
+	SetWorkerWatchdogInterval(5 * time.Second)
+	SetWorkerHeartbeatTimeout(30 * time.Second)
 }
 
 func TestWorkerConfigValidateAndNewWorkerBranches(t *testing.T) {
@@ -334,14 +363,69 @@ func TestStartAllWorkersAndLaunchWorkerBranches(t *testing.T) {
 	}
 }
 
+func TestStartAllWorkersWithContextCancellation(t *testing.T) {
+	resetWorkerTestState()
+	SetLogger(getTestLogger())
+	workerChan = make(chan WorkerInterface, 4)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var created atomic.Int32
+	workerList = []*WorkerConfig{
+		{
+			Name:      "never-starts",
+			MaxCount:  1,
+			IsEnabled: true,
+			New: func() (WorkerInterface, error) {
+				created.Add(1)
+				return &testWorker{name: "never-starts"}, nil
+			},
+		},
+	}
+
+	startAllWorkersWithContext(ctx)
+	assert.Equal(t, int32(0), created.Load())
+
+	resetWorkerTestState()
+	SetLogger(getTestLogger())
+	workerChan = make(chan WorkerInterface, 4)
+	ctx, cancel = context.WithCancel(context.Background())
+	runSignal := make(chan struct{}, 1)
+	workerList = []*WorkerConfig{
+		{
+			Name:      "starts-once",
+			MaxCount:  3,
+			IsEnabled: true,
+			New: func() (WorkerInterface, error) {
+				created.Add(1)
+				cancel()
+				return &testWorker{name: "starts-once", signalRun: runSignal}, nil
+			},
+		},
+	}
+
+	created.Store(0)
+	startAllWorkersWithContext(ctx)
+	assert.Equal(t, int32(1), created.Load())
+	select {
+	case <-runSignal:
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("expected first worker to start before test reset")
+	}
+}
+
 func TestRunWorkerSafelyBranches(t *testing.T) {
 	resetWorkerTestState()
 	SetLogger(getTestLogger())
-	workerChan = make(chan WorkerInterface, 3)
+	workerChan = make(chan WorkerInterface, 6)
 
-	runWorkerSafely(&testWorker{name: "ErrWorker", runErr: assert.AnError})
-	runWorkerSafely(&testWorker{name: "PanicWorker", panicRun: true})
-	runWorkerSafely(&testWorker{name: "NilExitWorker"})
+	errRuntime, _ := newWorkerRunContext(context.Background(), "err-worker-id", "ErrWorker")
+	panicRuntime, _ := newWorkerRunContext(context.Background(), "panic-worker-id", "PanicWorker")
+	nilRuntime, _ := newWorkerRunContext(context.Background(), "nil-worker-id", "NilExitWorker")
+
+	runWorkerSafely(&testWorker{name: "ErrWorker", runErr: assert.AnError}, errRuntime)
+	runWorkerSafely(&testWorker{name: "PanicWorker", panicRun: true}, panicRuntime)
+	runWorkerSafely(&testWorker{name: "NilExitWorker"}, nilRuntime)
 
 	seen := map[string]bool{}
 	timeout := time.After(500 * time.Millisecond)
@@ -353,6 +437,30 @@ func TestRunWorkerSafelyBranches(t *testing.T) {
 		case <-timeout:
 			t.Fatalf("expected 3 worker failure signals, got %d", len(seen))
 		}
+	}
+
+	canceledPanicRuntime, cancelPanic := newWorkerRunContext(context.Background(), "canceled-panic-id", "CanceledPanic")
+	cancelPanic()
+	canceledPanicWorker := &testWorker{name: "CanceledPanic", panicRun: true}
+	runWorkerSafely(canceledPanicWorker, canceledPanicRuntime)
+	assert.ErrorIs(t, canceledPanicWorker.GetWorkerExecutionErr(), context.Canceled)
+
+	canceledErrRuntime, cancelErr := newWorkerRunContext(context.Background(), "canceled-error-id", "CanceledError")
+	cancelErr()
+	canceledErrWorker := &testWorker{name: "CanceledError", runErr: assert.AnError}
+	runWorkerSafely(canceledErrWorker, canceledErrRuntime)
+	assert.ErrorIs(t, canceledErrWorker.GetWorkerExecutionErr(), assert.AnError)
+
+	canceledNilRuntime, cancelNil := newWorkerRunContext(context.Background(), "canceled-nil-id", "CanceledNil")
+	cancelNil()
+	canceledNilWorker := &testWorker{name: "CanceledNil"}
+	runWorkerSafely(canceledNilWorker, canceledNilRuntime)
+	assert.ErrorIs(t, canceledNilWorker.GetWorkerExecutionErr(), context.Canceled)
+
+	select {
+	case failed := <-workerChan:
+		t.Fatalf("canceled runtime should not emit failure signal, got %s", failed.GetWorkerName())
+	default:
 	}
 }
 
@@ -402,6 +510,10 @@ func TestSignalAndRegistrationBranches(t *testing.T) {
 	registerRunningWorker("wid", cfg)
 	assert.Equal(t, cfg, unregisterRunningWorker("wid"))
 	assert.Nil(t, unregisterRunningWorker("wid"))
+
+	workerConfigByID = map[string]*WorkerConfig{"legacy-id": cfg}
+	workerByID = map[string]*runningWorkerState{}
+	assert.Equal(t, cfg, unregisterRunningWorker("legacy-id"))
 }
 
 func TestRestartTrackingAndSchedulingBranches(t *testing.T) {
@@ -456,6 +568,143 @@ func TestRestartTrackingAndSchedulingBranches(t *testing.T) {
 	workerRestartHistory = make(map[string][]time.Time)
 	workerRestartLimit = 0
 	scheduleWorkerRestart(cfg, &testWorker{name: "schedule", id: "id-over-limit"})
+}
+
+func TestWorkerRuntimeAndWatchdogConfigBranches(t *testing.T) {
+	resetWorkerTestState()
+
+	runCtx, cancel := newWorkerRunContext(context.Background(), "wid", "wname")
+	defer cancel()
+	firstHeartbeat := runCtx.LastHeartbeat()
+	time.Sleep(time.Millisecond)
+	runCtx.Beat()
+
+	assert.Equal(t, "wid", runCtx.WorkerID())
+	assert.Equal(t, "wname", runCtx.WorkerName())
+	assert.True(t, runCtx.LastHeartbeat().After(firstHeartbeat))
+
+	SetWorkerWatchdogInterval(-1 * time.Second)
+	assert.Equal(t, 5*time.Second, GetWorkerWatchdogInterval())
+	SetWorkerWatchdogInterval(time.Millisecond)
+	assert.Equal(t, minOverseerSleep, GetWorkerWatchdogInterval())
+	SetWorkerWatchdogInterval(2 * time.Second)
+	assert.Equal(t, 2*time.Second, GetWorkerWatchdogInterval())
+
+	SetWorkerHeartbeatTimeout(-1 * time.Second)
+	assert.Equal(t, time.Duration(0), GetWorkerHeartbeatTimeout())
+	SetWorkerHeartbeatTimeout(3 * time.Second)
+	assert.Equal(t, 3*time.Second, GetWorkerHeartbeatTimeout())
+
+	applyOverseerOptions(&OverseerOptions{
+		Watchdog: WatchdogOptions{
+			Interval:         250 * time.Millisecond,
+			HeartbeatTimeout: 750 * time.Millisecond,
+		},
+	})
+	assert.Equal(t, 250*time.Millisecond, GetWorkerWatchdogInterval())
+	assert.Equal(t, 750*time.Millisecond, GetWorkerHeartbeatTimeout())
+}
+
+func TestCheckWorkerHeartbeats(t *testing.T) {
+	resetWorkerTestState()
+	SetLogger(getTestLogger())
+	workerChan = make(chan WorkerInterface, 4)
+	workerConfigByID = make(map[string]*WorkerConfig)
+	workerByID = make(map[string]*runningWorkerState)
+	workerRestartBackoff = 5 * time.Millisecond
+	workerRestartBackoffM = 5 * time.Millisecond
+
+	workerByID["nil-state"] = nil
+	SetWorkerHeartbeatTimeout(0)
+	checkWorkerHeartbeats(context.Background())
+	assert.Contains(t, workerByID, "nil-state")
+
+	SetWorkerHeartbeatTimeout(20 * time.Millisecond)
+	healthyRuntime, healthyCancel := newWorkerRunContext(context.Background(), "healthy-id", "healthy")
+	defer healthyCancel()
+	healthyCfg := &WorkerConfig{Name: "healthy", MaxCount: 1, IsEnabled: true, New: func() (WorkerInterface, error) {
+		return &testWorker{name: "healthy"}, nil
+	}}
+	registerRunningWorkerState("healthy-id", healthyCfg, &testWorker{name: "healthy", id: "healthy-id"}, healthyRuntime, healthyCancel)
+	checkWorkerHeartbeats(context.Background())
+	assert.NotNil(t, unregisterRunningWorker("healthy-id"))
+
+	var errorsSeen atomic.Int32
+	var stopsSeen atomic.Int32
+	var restartsSeen atomic.Int32
+	replacementStarted := make(chan struct{}, 1)
+	releaseReplacement := make(chan struct{})
+	staleCfg := &WorkerConfig{Name: "stale", MaxCount: 1, IsEnabled: true, New: func() (WorkerInterface, error) {
+		return &testWorker{name: "stale", signalRun: replacementStarted, blockRun: releaseReplacement}, nil
+	}}
+	setOverseerOptions(OverseerOptions{
+		Hooks: WorkerHooks{
+			OnError:   func(WorkerEvent) { errorsSeen.Add(1) },
+			OnStop:    func(WorkerEvent) { stopsSeen.Add(1) },
+			OnRestart: func(WorkerEvent) { restartsSeen.Add(1) },
+		},
+	})
+	staleRuntime, staleCancel := newWorkerRunContext(context.Background(), "stale-id", "stale")
+	staleRuntime.lastHeartbeat.Store(time.Now().Add(-time.Second).UnixNano())
+	staleWorker := &testWorker{name: "stale", id: "stale-id"}
+	registerRunningWorkerState("stale-id", staleCfg, staleWorker, staleRuntime, staleCancel)
+
+	checkWorkerHeartbeats(context.Background())
+
+	assert.Error(t, staleRuntime.Err())
+	assert.Error(t, staleWorker.GetWorkerExecutionErr())
+	assert.Contains(t, staleWorker.GetWorkerExecutionErr().Error(), "heartbeat timed out")
+	assert.Nil(t, unregisterRunningWorker("stale-id"))
+	assert.Equal(t, int32(1), errorsSeen.Load())
+	assert.Equal(t, int32(1), stopsSeen.Load())
+	assert.Equal(t, int32(1), restartsSeen.Load())
+
+	select {
+	case <-replacementStarted:
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("expected watchdog to start replacement worker")
+	}
+	close(releaseReplacement)
+	select {
+	case <-workerChan:
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("expected replacement worker to finish before test reset")
+	}
+}
+
+func TestScheduleWorkerRestartWithContextCancellation(t *testing.T) {
+	resetWorkerTestState()
+	SetLogger(getTestLogger())
+	workerChan = make(chan WorkerInterface, 1)
+	workerRestartHistory = make(map[string][]time.Time)
+	workerRestartBackoff = 5 * time.Millisecond
+	workerRestartBackoffM = 5 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var restartHooks atomic.Int32
+	var created atomic.Int32
+	setOverseerOptions(OverseerOptions{
+		Hooks: WorkerHooks{
+			OnRestart: func(WorkerEvent) {
+				restartHooks.Add(1)
+			},
+		},
+	})
+	cfg := &WorkerConfig{
+		Name:      "canceled-schedule",
+		MaxCount:  1,
+		IsEnabled: true,
+		New: func() (WorkerInterface, error) {
+			created.Add(1)
+			return &testWorker{name: "canceled-schedule"}, nil
+		},
+	}
+
+	scheduleWorkerRestartWithContext(ctx, cfg, &testWorker{name: "canceled-schedule", id: "wid"})
+	assert.Empty(t, workerRestartHistory)
+	assert.Equal(t, int32(0), restartHooks.Load())
+	assert.Equal(t, int32(0), created.Load())
 }
 
 func TestExecuteOverseerPanicRecoveryPath(t *testing.T) {
@@ -696,12 +945,14 @@ func TestStartOverseerWithNilContextDefaults(t *testing.T) {
 
 func TestExecuteOverseerRecoveryHonorsCanceledContext(t *testing.T) {
 	resetWorkerTestState()
-	SetLogger(getTestLogger())
 	SetOverseerSleepTimeout(20 * time.Millisecond)
 	restartLimit = 1
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	defer cancel()
+	SetLogger(&controlledPanicLogger{
+		onWarn: cancel,
+	})
 	workerList = []*WorkerConfig{
 		{
 			Name:      "canceled-recovery",
@@ -768,6 +1019,28 @@ func TestMonitorWorkersBranches(t *testing.T) {
 	case <-done:
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("monitorWorkers did not exit after controlled panic")
+	}
+}
+
+func TestMonitorWorkersTickerPath(t *testing.T) {
+	resetWorkerTestState()
+	SetLogger(getTestLogger())
+	SetWorkerWatchdogInterval(20 * time.Millisecond)
+	workerChan = make(chan WorkerInterface, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		monitorWorkersWithContext(ctx)
+		close(done)
+	}()
+
+	time.Sleep(150 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("monitorWorkersWithContext did not stop after ticker path")
 	}
 }
 

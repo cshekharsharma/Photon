@@ -1,6 +1,7 @@
 package caching
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -40,6 +41,7 @@ type fakeStore struct {
 	lastAppendKey    string
 	lastAppendFields map[string]string
 
+	calls  int
 	closed bool
 }
 
@@ -55,6 +57,7 @@ func (f *fakeStore) Close() {
 }
 
 func (f *fakeStore) Exists(key string) (bool, error) {
+	f.calls++
 	if f.existsErr != nil {
 		return false, f.existsErr
 	}
@@ -63,6 +66,7 @@ func (f *fakeStore) Exists(key string) (bool, error) {
 }
 
 func (f *fakeStore) Get(key string) (any, error) {
+	f.calls++
 	if f.getErr != nil {
 		return nil, f.getErr
 	}
@@ -74,6 +78,7 @@ func (f *fakeStore) Get(key string) (any, error) {
 }
 
 func (f *fakeStore) Set(key string, value map[string]any, ttl time.Duration) (bool, error) {
+	f.calls++
 	f.lastSetKey = key
 	f.lastSetValue = value
 	f.lastSetTTL = ttl
@@ -87,6 +92,7 @@ func (f *fakeStore) Set(key string, value map[string]any, ttl time.Duration) (bo
 }
 
 func (f *fakeStore) Delete(key string) (bool, error) {
+	f.calls++
 	if f.deleteErr != nil {
 		return false, f.deleteErr
 	}
@@ -97,6 +103,7 @@ func (f *fakeStore) Delete(key string) (bool, error) {
 }
 
 func (f *fakeStore) MultiGet(keys []string) (map[string]any, error) {
+	f.calls++
 	if f.multiGetErr != nil {
 		return nil, f.multiGetErr
 	}
@@ -110,6 +117,7 @@ func (f *fakeStore) MultiGet(keys []string) (map[string]any, error) {
 }
 
 func (f *fakeStore) MultiDelete(keys []string) (map[string]bool, error) {
+	f.calls++
 	if f.multiDelErr != nil {
 		return nil, f.multiDelErr
 	}
@@ -124,6 +132,7 @@ func (f *fakeStore) MultiDelete(keys []string) (map[string]bool, error) {
 }
 
 func (f *fakeStore) Increment(key string, fields map[string]int64) error {
+	f.calls++
 	if f.incrErr != nil {
 		return f.incrErr
 	}
@@ -133,6 +142,7 @@ func (f *fakeStore) Increment(key string, fields map[string]int64) error {
 }
 
 func (f *fakeStore) Decrement(key string, fields map[string]int64) error {
+	f.calls++
 	if f.decrErr != nil {
 		return f.decrErr
 	}
@@ -142,6 +152,7 @@ func (f *fakeStore) Decrement(key string, fields map[string]int64) error {
 }
 
 func (f *fakeStore) Append(key string, fields map[string]string) error {
+	f.calls++
 	if f.appendErr != nil {
 		return f.appendErr
 	}
@@ -151,6 +162,7 @@ func (f *fakeStore) Append(key string, fields map[string]string) error {
 }
 
 func (f *fakeStore) GetTTL(key string) (int64, error) {
+	f.calls++
 	if f.getTTLErr != nil {
 		return 0, f.getTTLErr
 	}
@@ -161,6 +173,7 @@ func (f *fakeStore) GetTTL(key string) (int64, error) {
 }
 
 func (f *fakeStore) SetTTL(key string, ttl time.Duration) error {
+	f.calls++
 	if f.setTTLErr != nil {
 		return f.setTTLErr
 	}
@@ -487,6 +500,76 @@ func TestSetWithNoFieldsNoValue(t *testing.T) {
 	}
 	if fs.lastSetTTL != 3*time.Second {
 		t.Fatalf("expected default TTL, got %v", fs.lastSetTTL)
+	}
+}
+
+func TestFlashDBContextMethodsCanceled(t *testing.T) {
+	fs := newFakeStore()
+	c := newTestCache(fs, 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	request := cacheRequest{Namespace: "ns", Collection: "coll"}
+
+	calls := []struct {
+		name string
+		run  func() error
+	}{
+		{"Exists", func() error {
+			_, err := c.ExistsContext(ctx, &ExistsRequest{cacheRequest: request, Key: "k"})
+			return err
+		}},
+		{"Get", func() error {
+			_, err := c.GetContext(ctx, &GetRequest{cacheRequest: request, Key: "k"})
+			return err
+		}},
+		{"Set", func() error {
+			_, err := c.SetContext(ctx, &SetRequest{cacheRequest: request, Key: "k", Value: "v"})
+			return err
+		}},
+		{"Delete", func() error {
+			_, err := c.DeleteContext(ctx, &DeleteRequest{cacheRequest: request, Key: "k"})
+			return err
+		}},
+		{"MultiGet", func() error {
+			_, err := c.MultiGetContext(ctx, &MultiGetRequest{cacheRequest: request, Keys: []string{"k"}})
+			return err
+		}},
+		{"MultiSet", func() error {
+			_, err := c.MultiSetContext(ctx, &MultiSetRequest{cacheRequest: request, ValueMap: map[string]any{"k": "v"}})
+			return err
+		}},
+		{"MultiDelete", func() error {
+			_, err := c.MultiDeleteContext(ctx, &MultiDeleteRequest{cacheRequest: request, Keys: []string{"k"}})
+			return err
+		}},
+		{"Increment", func() error {
+			return c.IncrementContext(ctx, &IncrementRequest{cacheRequest: request, Key: "k", Value: 1})
+		}},
+		{"Decrement", func() error {
+			return c.DecrementContext(ctx, &DecrementRequest{cacheRequest: request, Key: "k", Value: 1})
+		}},
+		{"Append", func() error {
+			return c.AppendContext(ctx, &AppendRequest{cacheRequest: request, Key: "k", Value: "v"})
+		}},
+		{"GetTTL", func() error {
+			_, err := c.GetTTLContext(ctx, &GetTTLRequest{cacheRequest: request, Key: "k"})
+			return err
+		}},
+		{"SetTTL", func() error {
+			return c.SetTTLContext(ctx, &SetTTLRequest{cacheRequest: request, Key: "k", TTL: 1})
+		}},
+	}
+
+	for _, tc := range calls {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.run(); !errors.Is(err, context.Canceled) {
+				t.Fatalf("expected context.Canceled, got %v", err)
+			}
+		})
+	}
+	if fs.calls != 0 {
+		t.Fatalf("expected canceled context to skip store calls, got %d", fs.calls)
 	}
 }
 

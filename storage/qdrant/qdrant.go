@@ -37,9 +37,9 @@ func NewRESTClient(cfg *ConnectionConfig) (*restClient, error) {
 	if base == "" {
 		return nil, errors.New("qdrant: BaseURL is required")
 	}
-	u, err := url.Parse(base)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return nil, errors.New("qdrant: invalid BaseURL")
+	baseURL, err := validateBaseURL(base)
+	if err != nil {
+		return nil, err
 	}
 
 	timeout := cfg.Timeout
@@ -88,11 +88,17 @@ func NewRESTClient(cfg *ConnectionConfig) (*restClient, error) {
 	}
 
 	return &restClient{
-		baseURL: strings.TrimRight(base, "/"),
+		baseURL: baseURL,
 		apiKey:  cfg.APIKey,
 		httpClient: &http.Client{
 			Transport: tr,
 			Timeout:   timeout,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) == 0 || sameURLAuthority(req.URL, via[0].URL) {
+					return nil
+				}
+				return http.ErrUseLastResponse
+			},
 		},
 		retryMaxAttempts: maxAttempts,
 		retryBaseDelay:   baseDelay,
@@ -269,8 +275,31 @@ func jsonPayload(in any) ([]byte, error) {
 	return json.Marshal(in)
 }
 
+func validateBaseURL(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || !u.IsAbs() || u.Host == "" {
+		return "", errors.New("qdrant: invalid BaseURL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", errors.New("qdrant: BaseURL must use http or https")
+	}
+	if u.User != nil {
+		return "", errors.New("qdrant: BaseURL must not include credentials")
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return "", errors.New("qdrant: BaseURL must not include query or fragment")
+	}
+	u.Path = strings.TrimRight(u.Path, "/")
+	u.RawPath = ""
+	return u.String(), nil
+}
+
 func (c *restClient) newRequest(ctx context.Context, method, path string, payload []byte, hasPayload bool) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(payload))
+	target, err := c.requestURL(path)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, method, target, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -283,8 +312,29 @@ func (c *restClient) newRequest(ctx context.Context, method, path string, payloa
 	return req, nil
 }
 
+func (c *restClient) requestURL(path string) (string, error) {
+	if !strings.HasPrefix(path, "/") {
+		return "", errors.New("qdrant: request path must be absolute")
+	}
+	base, err := url.Parse(c.baseURL)
+	if err != nil {
+		return "", errors.New("qdrant: invalid BaseURL")
+	}
+	pathPart, query, _ := strings.Cut(path, "?")
+	u := *base
+	u.Path = strings.TrimRight(base.Path, "/") + pathPart
+	u.RawPath = ""
+	u.RawQuery = query
+	u.Fragment = ""
+	return u.String(), nil
+}
+
+func sameURLAuthority(a, b *url.URL) bool {
+	return a != nil && b != nil && a.Scheme == b.Scheme && strings.EqualFold(a.Host, b.Host)
+}
+
 func (c *restClient) doRequest(req *http.Request) (int, []byte, error) {
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req) // #nosec G704 -- BaseURL is structurally validated and redirects are confined to the same authority.
 	if err != nil {
 		return 0, nil, err
 	}

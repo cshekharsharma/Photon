@@ -268,10 +268,12 @@ func (b *Backoff) Retry(ctx context.Context, fn func(context.Context, ...any) (a
 				b.Metrics(retryCtx)
 			}
 
+			timer := time.NewTimer(delay)
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return nil, ctx.Err()
-			case <-time.After(delay):
+			case <-timer.C:
 			}
 		}
 	}

@@ -9,15 +9,7 @@ import (
 )
 
 func resetConfigTestState() {
-	cMutex.Lock()
-	defer cMutex.Unlock()
-	if cManager != nil {
-		cManager.Close()
-	}
-	instance = nil
-	cProvider = ConfigProviderKoanf
-	cOptions = nil
-	cManager = nil
+	Close()
 }
 
 func newValidOptions(t *testing.T) *Options {
@@ -103,6 +95,23 @@ func TestLoad_ReturnsSingletonInstance(t *testing.T) {
 	c2 := Load()
 	if c != c2 {
 		t.Error("Expected singleton config instance")
+	}
+}
+
+func TestCloseClearsConfigState(t *testing.T) {
+	resetConfigTestState()
+	opt := newValidOptions(t)
+	if err := Init("koanf", opt); err != nil {
+		t.Fatalf("expected no init error, got %v", err)
+	}
+	if cfg, err := LoadE(); err != nil || cfg == nil {
+		t.Fatalf("expected loaded config, cfg=%#v err=%v", cfg, err)
+	}
+
+	Close()
+
+	if cfg, err := LoadE(); err == nil || cfg != nil {
+		t.Fatalf("expected uninitialized error after close, cfg=%#v err=%v", cfg, err)
 	}
 }
 

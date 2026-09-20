@@ -1,9 +1,11 @@
 package caching
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -62,6 +64,14 @@ func NewMemcachedCache(opts *Options, connector memcached.MemcachedConnectorInte
 // Exists checks if a given key exists in the cache.
 // Returns true if the key is found, false otherwise.
 func (c *MemcachedCache) Exists(request *ExistsRequest) (bool, error) {
+	return c.ExistsContext(context.Background(), request)
+}
+
+func (c *MemcachedCache) ExistsContext(ctx context.Context, request *ExistsRequest) (bool, error) {
+	if _, err := checkedCacheContext(ctx); err != nil {
+		return false, err
+	}
+
 	key := c.formatKey(request.Namespace, request.Collection, request.Key)
 	_, err := c.memc.GetClient().Get(key)
 
@@ -79,6 +89,14 @@ func (c *MemcachedCache) Exists(request *ExistsRequest) (bool, error) {
 // Get retrieves the value associated with a given key.
 // Returns nil if the key is not found.
 func (c *MemcachedCache) Get(request *GetRequest) (any, error) {
+	return c.GetContext(context.Background(), request)
+}
+
+func (c *MemcachedCache) GetContext(ctx context.Context, request *GetRequest) (any, error) {
+	if _, err := checkedCacheContext(ctx); err != nil {
+		return nil, err
+	}
+
 	key := c.formatKey(request.Namespace, request.Collection, request.Key)
 	item, err := c.memc.GetClient().Get(key)
 
@@ -96,7 +114,19 @@ func (c *MemcachedCache) Get(request *GetRequest) (any, error) {
 // Set stores a value in the cache with optional TTL expiration.
 // Returns true if the operation succeeds.
 func (c *MemcachedCache) Set(request *SetRequest) (bool, error) {
+	return c.SetContext(context.Background(), request)
+}
+
+func (c *MemcachedCache) SetContext(ctx context.Context, request *SetRequest) (bool, error) {
+	if _, err := checkedCacheContext(ctx); err != nil {
+		return false, err
+	}
+
 	key := c.formatKey(request.Namespace, request.Collection, request.Key)
+	expiration, err := memcachedTTL(request.TTL)
+	if err != nil {
+		return false, err
+	}
 
 	bytesValue, err := memcachedSerializeValue(c, request.Value)
 	if err != nil {
@@ -106,7 +136,7 @@ func (c *MemcachedCache) Set(request *SetRequest) (bool, error) {
 	item := &memcache.Item{
 		Key:        key,
 		Value:      bytesValue,
-		Expiration: int32(request.TTL),
+		Expiration: expiration,
 	}
 
 	err = c.memc.GetClient().Set(item)
@@ -116,6 +146,14 @@ func (c *MemcachedCache) Set(request *SetRequest) (bool, error) {
 // Delete removes a key from the cache.
 // Returns true if the key was successfully deleted.
 func (c *MemcachedCache) Delete(request *DeleteRequest) (bool, error) {
+	return c.DeleteContext(context.Background(), request)
+}
+
+func (c *MemcachedCache) DeleteContext(ctx context.Context, request *DeleteRequest) (bool, error) {
+	if _, err := checkedCacheContext(ctx); err != nil {
+		return false, err
+	}
+
 	key := c.formatKey(request.Namespace, request.Collection, request.Key)
 	err := c.memc.GetClient().Delete(key)
 
@@ -129,6 +167,14 @@ func (c *MemcachedCache) Delete(request *DeleteRequest) (bool, error) {
 // MultiGet retrieves multiple values for a list of keys.
 // Returns a map of keys to values, missing keys will be absent.
 func (c *MemcachedCache) MultiGet(request *MultiGetRequest) (map[string]any, error) {
+	return c.MultiGetContext(context.Background(), request)
+}
+
+func (c *MemcachedCache) MultiGetContext(ctx context.Context, request *MultiGetRequest) (map[string]any, error) {
+	if _, err := checkedCacheContext(ctx); err != nil {
+		return nil, err
+	}
+
 	formattedKeys := make([]string, len(request.Keys))
 
 	for i, key := range request.Keys {
@@ -154,6 +200,18 @@ func (c *MemcachedCache) MultiGet(request *MultiGetRequest) (map[string]any, err
 // MultiSet sets multiple key-value pairs into the cache in batch.
 // Returns a map of success status per key.
 func (c *MemcachedCache) MultiSet(request *MultiSetRequest) (map[string]bool, error) {
+	return c.MultiSetContext(context.Background(), request)
+}
+
+func (c *MemcachedCache) MultiSetContext(ctx context.Context, request *MultiSetRequest) (map[string]bool, error) {
+	if _, err := checkedCacheContext(ctx); err != nil {
+		return nil, err
+	}
+	expiration, err := memcachedTTL(request.TTL)
+	if err != nil {
+		return nil, err
+	}
+
 	result := make(map[string]bool)
 	var lastError error
 
@@ -168,7 +226,7 @@ func (c *MemcachedCache) MultiSet(request *MultiSetRequest) (map[string]bool, er
 		item := &memcache.Item{
 			Key:        c.formatKey(request.Namespace, request.Collection, key),
 			Value:      bytesValue,
-			Expiration: int32(request.TTL),
+			Expiration: expiration,
 		}
 
 		err = c.memc.GetClient().Set(item)
@@ -186,6 +244,14 @@ func (c *MemcachedCache) MultiSet(request *MultiSetRequest) (map[string]bool, er
 // MultiDelete deletes multiple keys from the cache.
 // Returns a map of success status per key.
 func (c *MemcachedCache) MultiDelete(request *MultiDeleteRequest) (map[string]bool, error) {
+	return c.MultiDeleteContext(context.Background(), request)
+}
+
+func (c *MemcachedCache) MultiDeleteContext(ctx context.Context, request *MultiDeleteRequest) (map[string]bool, error) {
+	if _, err := checkedCacheContext(ctx); err != nil {
+		return nil, err
+	}
+
 	result := make(map[string]bool)
 
 	for _, key := range request.Keys {
@@ -208,9 +274,21 @@ func (c *MemcachedCache) MultiDelete(request *MultiDeleteRequest) (map[string]bo
 // Increment atomically increases a key's numeric value by the specified amount.
 // Returns an error if the operation fails or key doesn't exist.
 func (c *MemcachedCache) Increment(request *IncrementRequest) error {
-	key := c.formatKey(request.Namespace, request.Collection, request.Key)
+	return c.IncrementContext(context.Background(), request)
+}
 
-	_, err := c.memc.GetClient().Increment(key, uint64(request.Value))
+func (c *MemcachedCache) IncrementContext(ctx context.Context, request *IncrementRequest) error {
+	if _, err := checkedCacheContext(ctx); err != nil {
+		return err
+	}
+
+	key := c.formatKey(request.Namespace, request.Collection, request.Key)
+	delta, err := memcachedDelta(request.Value)
+	if err != nil {
+		return err
+	}
+
+	_, err = c.memc.GetClient().Increment(key, delta)
 	if err != nil {
 		return err
 	}
@@ -221,9 +299,21 @@ func (c *MemcachedCache) Increment(request *IncrementRequest) error {
 // Decrement atomically decreases a key's numeric value by the specified amount.
 // Returns an error if the operation fails or key doesn't exist.
 func (c *MemcachedCache) Decrement(request *DecrementRequest) error {
-	key := c.formatKey(request.Namespace, request.Collection, request.Key)
+	return c.DecrementContext(context.Background(), request)
+}
 
-	_, err := c.memc.GetClient().Decrement(key, uint64(request.Value))
+func (c *MemcachedCache) DecrementContext(ctx context.Context, request *DecrementRequest) error {
+	if _, err := checkedCacheContext(ctx); err != nil {
+		return err
+	}
+
+	key := c.formatKey(request.Namespace, request.Collection, request.Key)
+	delta, err := memcachedDelta(request.Value)
+	if err != nil {
+		return err
+	}
+
+	_, err = c.memc.GetClient().Decrement(key, delta)
 	if err != nil {
 		return err
 	}
@@ -234,6 +324,14 @@ func (c *MemcachedCache) Decrement(request *DecrementRequest) error {
 // Append appends the given value to an existing key's value.
 // Returns an error if the key does not exist or append fails.
 func (c *MemcachedCache) Append(request *AppendRequest) error {
+	return c.AppendContext(context.Background(), request)
+}
+
+func (c *MemcachedCache) AppendContext(ctx context.Context, request *AppendRequest) error {
+	if _, err := checkedCacheContext(ctx); err != nil {
+		return err
+	}
+
 	key := c.formatKey(request.Namespace, request.Collection, request.Key)
 
 	valBytes, err := memcachedSerializeValue(c, request.Value)
@@ -256,14 +354,34 @@ func (c *MemcachedCache) Append(request *AppendRequest) error {
 // GetTTL is not supported in Memcached.
 // Always returns an error indicating unsupported operation.
 func (c *MemcachedCache) GetTTL(request *GetTTLRequest) (int64, error) {
+	return c.GetTTLContext(context.Background(), request)
+}
+
+func (c *MemcachedCache) GetTTLContext(ctx context.Context, request *GetTTLRequest) (int64, error) {
+	if _, err := checkedCacheContext(ctx); err != nil {
+		return 0, err
+	}
+
 	return 0, errors.New("GetTTL not supported in Memcached")
 }
 
 // SetTTL updates the expiration time (TTL) of an existing key.
 // Internally uses the Memcached Touch() operation.
 func (c *MemcachedCache) SetTTL(request *SetTTLRequest) error {
+	return c.SetTTLContext(context.Background(), request)
+}
+
+func (c *MemcachedCache) SetTTLContext(ctx context.Context, request *SetTTLRequest) error {
+	if _, err := checkedCacheContext(ctx); err != nil {
+		return err
+	}
+
 	key := c.formatKey(request.Namespace, request.Collection, request.Key)
-	return c.memc.GetClient().Touch(key, int32(request.TTL))
+	expiration, err := memcachedTTL(request.TTL)
+	if err != nil {
+		return err
+	}
+	return c.memc.GetClient().Touch(key, expiration)
 }
 
 // formatKey constructs a full key using namespace, collection, and user key.
@@ -293,4 +411,18 @@ func (c *MemcachedCache) getSerialisedValue(val any) ([]byte, error) {
 	}
 
 	return bytesValue, nil
+}
+
+func memcachedTTL(ttl int64) (int32, error) {
+	if ttl < 0 || ttl > math.MaxInt32 {
+		return 0, fmt.Errorf("memcached: TTL out of range")
+	}
+	return int32(ttl), nil // #nosec G115 -- range checked above.
+}
+
+func memcachedDelta(value int64) (uint64, error) {
+	if value < 0 {
+		return 0, fmt.Errorf("memcached: delta cannot be negative")
+	}
+	return uint64(value), nil // #nosec G115 -- range checked above.
 }

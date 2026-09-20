@@ -33,10 +33,6 @@ linters:
             - pkg: "log$"
               desc: "Use structured logging instead of the standard log package"
 
-    gosec:
-      excludes:
-        - G115
-
     revive:
       severity: warning
       confidence: 0.8

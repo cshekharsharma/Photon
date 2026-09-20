@@ -22,23 +22,49 @@ func RequestIDInterceptor() grpc.UnaryServerInterceptor {
 		info *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler,
 	) (interface{}, error) {
-
-		md, ok := metadata.FromIncomingContext(ctx)
-		if !ok {
-			md = metadata.New(nil)
-		}
-
-		rid := GetRequestID(md)
-		if rid == "" {
-			rid = uuid.New().String()
-			md.Set(string(requestIDKey), rid)
-			ctx = metadata.NewIncomingContext(ctx, md)
-		}
-
-		// Save request ID in context for downstream use
-		ctx = context.WithValue(ctx, requestIDKey, rid)
-		return handler(ctx, req)
+		return handler(contextWithRequestID(ctx), req)
 	}
+}
+
+type contextServerStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s *contextServerStream) Context() context.Context {
+	return s.ctx
+}
+
+// StreamRequestIDInterceptor ensures that a request ID is present for streaming RPCs.
+func StreamRequestIDInterceptor() grpc.StreamServerInterceptor {
+	return func(
+		srv interface{},
+		ss grpc.ServerStream,
+		info *grpc.StreamServerInfo,
+		handler grpc.StreamHandler,
+	) error {
+		ctx := contextWithRequestID(ss.Context())
+		return handler(srv, &contextServerStream{
+			ServerStream: ss,
+			ctx:          ctx,
+		})
+	}
+}
+
+func contextWithRequestID(ctx context.Context) context.Context {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		md = metadata.New(nil)
+	}
+
+	rid := GetRequestID(md)
+	if rid == "" {
+		rid = uuid.New().String()
+		md.Set(string(requestIDKey), rid)
+		ctx = metadata.NewIncomingContext(ctx, md)
+	}
+
+	return context.WithValue(ctx, requestIDKey, rid)
 }
 
 // getRequestID extracts request ID from metadata.

@@ -45,3 +45,31 @@ func TestLoggingInterceptor_Error(t *testing.T) {
 	assert.Nil(t, resp)
 	assert.EqualError(t, err, "test error")
 }
+
+func TestStreamLoggingInterceptor_Success(t *testing.T) {
+	buff := &bytes.Buffer{}
+	interceptor := StreamLoggingInterceptor(getLogger("TestStreamLoggingInterceptor_Success", buff))
+
+	err := interceptor(nil, &testServerStream{ctx: context.Background()}, &grpc.StreamServerInfo{
+		FullMethod: "/test.StreamLogged",
+	}, func(_ interface{}, _ grpc.ServerStream) error {
+		time.Sleep(5 * time.Millisecond)
+		return nil
+	})
+
+	assert.NoError(t, err)
+}
+
+func TestStreamLoggingInterceptor_Error(t *testing.T) {
+	buff := &bytes.Buffer{}
+	interceptor := StreamLoggingInterceptor(getLogger("TestStreamLoggingInterceptor_Error", buff))
+
+	err := interceptor(nil, &testServerStream{ctx: context.Background()}, &grpc.StreamServerInfo{
+		FullMethod: "/test.StreamFail",
+	}, func(_ interface{}, _ grpc.ServerStream) error {
+		time.Sleep(5 * time.Millisecond)
+		return errors.New("stream test error")
+	})
+
+	assert.EqualError(t, err, "stream test error")
+}

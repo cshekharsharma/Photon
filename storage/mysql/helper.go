@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
@@ -20,6 +21,15 @@ var helperMySqlConnector MySqlDbConnectorInterface = &MySqlDbConnector{}
 var scanReadRow = func(rows *sql.Rows, dest ...interface{}) error { return rows.Scan(dest...) }
 var getReadColumns = func(rows *sql.Rows) ([]string, error) { return rows.Columns() }
 var newHashWriter = func() hashWriter { return sha256.New() }
+var mysqlIdentifierRegexp = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var mysqlHelperOperationHook func(mysqlHelperOperationEvent)
+
+type mysqlHelperOperationEvent struct {
+	Operation string
+	Query     string
+	Args      []interface{}
+	Err       error
+}
 
 type hashWriter interface {
 	Write(p []byte) (n int, err error)
@@ -36,6 +46,71 @@ func closeSQLCloser(closer sqlCloser) {
 	}
 }
 
+func safeMySQLIdent(ident string) (string, error) {
+	ident = strings.TrimSpace(ident)
+	if ident == "" {
+		return "", fmt.Errorf("empty identifier")
+	}
+
+	parts := strings.Split(ident, ".")
+	for i, part := range parts {
+		if !mysqlIdentifierRegexp.MatchString(part) {
+			return "", fmt.Errorf("invalid identifier %q", ident)
+		}
+		parts[i] = "`" + part + "`"
+	}
+
+	return strings.Join(parts, "."), nil
+}
+
+func quoteMySQLIdentifiers(fields []string) ([]string, error) {
+	quoted := make([]string, 0, len(fields))
+	for _, field := range fields {
+		identifier, err := safeMySQLIdent(field)
+		if err != nil {
+			return nil, err
+		}
+		quoted = append(quoted, identifier)
+	}
+	return quoted, nil
+}
+
+func notifyMySQLHelperOperation(operation string, query string, args []interface{}, err error) {
+	if mysqlHelperOperationHook == nil {
+		return
+	}
+	mysqlHelperOperationHook(mysqlHelperOperationEvent{
+		Operation: operation,
+		Query:     query,
+		Args:      append([]interface{}(nil), args...),
+		Err:       err,
+	})
+}
+
+func queryMySQLHelperOperation(
+	ctx context.Context,
+	dbctx *DBContext,
+	operation string,
+	query string,
+	args ...interface{},
+) (*sql.Rows, error) {
+	rows, err := dbctx.QueryContext(ctx, query, args...)
+	notifyMySQLHelperOperation(operation, query, args, err)
+	return rows, err
+}
+
+func execMySQLHelperOperation(
+	ctx context.Context,
+	dbctx *DBContext,
+	operation string,
+	query string,
+	args ...interface{},
+) (sql.Result, error) {
+	result, err := dbctx.ExecContext(ctx, query, args...)
+	notifyMySQLHelperOperation(operation, query, args, err)
+	return result, err
+}
+
 // ExecuteReadQuery runs a read-only SELECT query on a given cluster,
 // returning results as a slice of maps where each map represents a row.
 // If CapitaliseColumns is set to true in the input, column names in the result
@@ -49,23 +124,15 @@ func closeSQLCloser(closer sqlCloser) {
 //   - []map[string]interface{}: list of result rows.
 //   - error: any error encountered while querying.
 func ExecuteReadQuery(dbctx *DBContext, queryInput ReadQueryInput) ([]map[string]interface{}, error) {
+	return ExecuteReadQueryContext(context.Background(), dbctx, queryInput)
+}
+
+func ExecuteReadQueryContext(ctx context.Context, dbctx *DBContext, queryInput ReadQueryInput) ([]map[string]interface{}, error) {
 	if dbctx == nil {
 		return nil, fmt.Errorf("nil DB context provided, cannot execute the query")
 	}
 
-	stmt, err := dbctx.Prepare(queryInput.Query)
-	if err != nil {
-		return nil, fmt.Errorf("error preparing statement: %w", err)
-	}
-
-	if stmt != nil {
-		defer func() {
-			_ = stmt.Close()
-		}()
-	}
-
-	rows, err := dbctx.Query(queryInput.Query, queryInput.Params...)
-
+	rows, err := queryMySQLHelperOperation(ctx, dbctx, "execute_read", queryInput.Query, queryInput.Params...)
 	if err != nil {
 		return nil, err
 	}
@@ -125,11 +192,15 @@ func ExecuteReadQuery(dbctx *DBContext, queryInput ReadQueryInput) ([]map[string
 //   - last insert ID (0 if not applicable)
 //   - error if any.
 func ExecuteWriteQuery(dbctx *DBContext, query string, params []interface{}) (int64, int64, error) {
+	return ExecuteWriteQueryContext(context.Background(), dbctx, query, params)
+}
+
+func ExecuteWriteQueryContext(ctx context.Context, dbctx *DBContext, query string, params []interface{}) (int64, int64, error) {
 	if dbctx == nil {
 		return 0, 0, fmt.Errorf("nil DB context provided, cannot execute the query")
 	}
 
-	result, err := dbctx.Exec(query, params...)
+	result, err := execMySQLHelperOperation(ctx, dbctx, "execute_write", query, params...)
 
 	if err != nil {
 		return 0, 0, fmt.Errorf("error executing query: %w", err)
@@ -161,6 +232,10 @@ func ExecuteWriteQuery(dbctx *DBContext, query string, params []interface{}) (in
 //   - rows affected
 //   - error if any.
 func MultiInsertFromStructsArray[T any](dbctx *DBContext, tableName string, data []T) (int64, error) {
+	return MultiInsertFromStructsArrayContext(context.Background(), dbctx, tableName, data)
+}
+
+func MultiInsertFromStructsArrayContext[T any](ctx context.Context, dbctx *DBContext, tableName string, data []T) (int64, error) {
 	if len(data) == 0 {
 		return 0, fmt.Errorf("input data array is empty")
 	}
@@ -174,7 +249,7 @@ func MultiInsertFromStructsArray[T any](dbctx *DBContext, tableName string, data
 		return 0, fmt.Errorf("nil DB context provided, cannot execute the query")
 	}
 
-	result, err := dbctx.Exec(query, allValues...)
+	result, err := execMySQLHelperOperation(ctx, dbctx, "multi_insert_structs", query, allValues...)
 
 	if err != nil {
 		return 0, fmt.Errorf("error executing insert: %w", err)
@@ -203,108 +278,159 @@ func generateMultiInsertQueriesFromStructArray[T any](tableName string, data []T
 	if len(data) == 0 {
 		return "", nil, fmt.Errorf("no data provided")
 	}
+	quotedTableName, err := safeMySQLIdent(tableName)
+	if err != nil {
+		return "", nil, err
+	}
 
 	dataLen := len(data)
 	var queryBuilder strings.Builder
-	fieldsMap := make(map[string]struct{})
 
-	firstRow := data[0]
-	sValue := reflect.ValueOf(firstRow)
-	if sValue.Kind() == reflect.Pointer {
-		sValue = sValue.Elem()
+	firstRowValue, err := mysqlStructValue(data[0])
+	if err != nil {
+		return "", nil, err
 	}
-	t := sValue.Type()
-
-	// Dynamically estimate number of fields based on struct tags
-	estimatedFieldCount := 0
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		if dbTag := field.Tag.Get("db"); dbTag != "" {
-			tagParts := strings.Split(dbTag, ",")
-			if tagParts[0] != "-" {
-				estimatedFieldCount++
-			}
-		}
+	t := firstRowValue.Type()
+	fields, quotedFields, err := mysqlInsertFields(t)
+	if err != nil {
+		return "", nil, err
 	}
 
-	fields := make([]string, 0, estimatedFieldCount)
-	allValues := make([]interface{}, 0, dataLen*estimatedFieldCount)
+	allValues := make([]interface{}, 0, dataLen*len(fields))
 	valueStrings := make([]string, 0, dataLen)
 
-	// Extract field names from the first row
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		if dbTag := field.Tag.Get("db"); dbTag != "" {
-			tagParts := strings.Split(dbTag, ",")
-			fieldName := tagParts[0]
-			if fieldName != "-" {
-				fieldsMap[fieldName] = struct{}{}
-				fields = append(fields, fieldName)
-			}
-		}
-	}
-
 	for _, row := range data {
-		sValue = reflect.ValueOf(row)
-		if sValue.Kind() == reflect.Pointer {
-			sValue = sValue.Elem()
+		sValue, err := mysqlStructValue(row)
+		if err != nil {
+			return "", nil, err
+		}
+		if sValue.Type() != t {
+			return "", nil, fmt.Errorf("expected struct type %s, got %s", t, sValue.Type())
 		}
 
-		rowPlaceholders := make([]string, len(fields))
-		fieldValues := make(map[string]interface{})
-		fieldIsDefault := make(map[string]bool)
-
-		for i := 0; i < t.NumField(); i++ {
-			field := t.Field(i)
-			if dbTag := field.Tag.Get("db"); dbTag != "" {
-				tagParts := strings.Split(dbTag, ",")
-				fieldName := tagParts[0]
-
-				if fieldName == "-" {
-					continue
-				}
-
-				if _, exists := fieldsMap[fieldName]; exists {
-					value := sValue.Field(i).Interface()
-					omitempty := slices.Contains(tagParts, "omitempty")
-					useDefault := omitempty && types.IsEmpty(value)
-
-					if !useDefault && slices.Contains(tagParts, "marshaljson") && sValue.Field(i).Kind() == reflect.Struct {
-						jsonValue, err := json.Marshal(value)
-						if err != nil {
-							return "", nil, err
-						}
-						value = string(jsonValue)
-					}
-
-					fieldValues[fieldName] = value
-					fieldIsDefault[fieldName] = useDefault
-				}
-			}
+		rowPlaceholders, rowValues, err := mysqlInsertRowValues(sValue, t, fields)
+		if err != nil {
+			return "", nil, err
 		}
-
-		rowValues := make([]interface{}, 0, len(fields))
-		for i, fieldName := range fields {
-			if fieldIsDefault[fieldName] {
-				rowPlaceholders[i] = "DEFAULT"
-			} else {
-				rowPlaceholders[i] = "?"
-				rowValues = append(rowValues, fieldValues[fieldName])
-			}
-		}
-
 		allValues = append(allValues, rowValues...)
 		valueStrings = append(valueStrings, "("+strings.Join(rowPlaceholders, ", ")+")")
 	}
 
-	queryBuilder.WriteString("INSERT INTO `")
-	queryBuilder.WriteString(tableName)
-	queryBuilder.WriteString("` (")
-	queryBuilder.WriteString(strings.Join(fields, ", "))
+	queryBuilder.WriteString("INSERT INTO ")
+	queryBuilder.WriteString(quotedTableName)
+	queryBuilder.WriteString(" (")
+	queryBuilder.WriteString(strings.Join(quotedFields, ", "))
 	queryBuilder.WriteString(") VALUES ")
 	queryBuilder.WriteString(strings.Join(valueStrings, ", "))
 
 	return queryBuilder.String(), allValues, nil
+}
+
+func mysqlStructValue(row interface{}) (reflect.Value, error) {
+	sValue := reflect.ValueOf(row)
+	if sValue.Kind() == reflect.Pointer {
+		if sValue.IsNil() {
+			return reflect.Value{}, fmt.Errorf("expected struct input, got nil pointer")
+		}
+		sValue = sValue.Elem()
+	}
+	if sValue.Kind() != reflect.Struct {
+		return reflect.Value{}, fmt.Errorf("expected struct input, got %s", sValue.Kind())
+	}
+	return sValue, nil
+}
+
+func mysqlInsertFields(t reflect.Type) ([]string, []string, error) {
+	fields := make([]string, 0, mysqlTaggedFieldCount(t))
+	for i := 0; i < t.NumField(); i++ {
+		fieldName := mysqlDBTagName(t.Field(i))
+		if fieldName == "" {
+			continue
+		}
+		fields = append(fields, fieldName)
+	}
+
+	quotedFields, err := quoteMySQLIdentifiers(fields)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(quotedFields) == 0 {
+		return nil, nil, fmt.Errorf("no insertable fields found (check db tags)")
+	}
+	return fields, quotedFields, nil
+}
+
+func mysqlTaggedFieldCount(t reflect.Type) int {
+	count := 0
+	for i := 0; i < t.NumField(); i++ {
+		if mysqlDBTagName(t.Field(i)) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func mysqlDBTagName(field reflect.StructField) string {
+	dbTag := field.Tag.Get("db")
+	if dbTag == "" {
+		return ""
+	}
+	fieldName := strings.Split(dbTag, ",")[0]
+	if fieldName == "-" {
+		return ""
+	}
+	return fieldName
+}
+
+func mysqlInsertRowValues(
+	sValue reflect.Value,
+	t reflect.Type,
+	fields []string,
+) ([]string, []interface{}, error) {
+	rowPlaceholders := make([]string, len(fields))
+	fieldValues := make(map[string]interface{})
+	fieldIsDefault := make(map[string]bool)
+
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		fieldName := mysqlDBTagName(field)
+		if fieldName == "" {
+			continue
+		}
+
+		value, useDefault, err := mysqlInsertFieldValue(sValue.Field(i), field)
+		if err != nil {
+			return nil, nil, err
+		}
+		fieldValues[fieldName] = value
+		fieldIsDefault[fieldName] = useDefault
+	}
+
+	rowValues := make([]interface{}, 0, len(fields))
+	for i, fieldName := range fields {
+		if fieldIsDefault[fieldName] {
+			rowPlaceholders[i] = "DEFAULT"
+			continue
+		}
+		rowPlaceholders[i] = "?"
+		rowValues = append(rowValues, fieldValues[fieldName])
+	}
+	return rowPlaceholders, rowValues, nil
+}
+
+func mysqlInsertFieldValue(value reflect.Value, field reflect.StructField) (interface{}, bool, error) {
+	tagParts := strings.Split(field.Tag.Get("db"), ",")
+	fieldValue := value.Interface()
+	useDefault := slices.Contains(tagParts, "omitempty") && types.IsEmpty(fieldValue)
+	if useDefault || !slices.Contains(tagParts, "marshaljson") || value.Kind() != reflect.Struct {
+		return fieldValue, useDefault, nil
+	}
+
+	jsonValue, err := json.Marshal(fieldValue)
+	if err != nil {
+		return nil, false, err
+	}
+	return string(jsonValue), false, nil
 }
 
 // InsertFromStruct inserts a single record into the given table using field tags from a struct.
@@ -320,9 +446,21 @@ func generateMultiInsertQueriesFromStructArray[T any](tableName string, data []T
 //   - last insert ID
 //   - error if any.
 func InsertFromStruct(dbctx *DBContext, tableName string, data interface{}) (int64, int64, error) {
+	return InsertFromStructContext(context.Background(), dbctx, tableName, data)
+}
+
+func InsertFromStructContext(ctx context.Context, dbctx *DBContext, tableName string, data interface{}) (int64, int64, error) {
+	quotedTableName, err := safeMySQLIdent(tableName)
+	if err != nil {
+		return 0, 0, err
+	}
+
 	sValue := reflect.ValueOf(data)
 	if sValue.Kind() == reflect.Pointer {
 		sValue = sValue.Elem()
+	}
+	if sValue.Kind() != reflect.Struct {
+		return 0, 0, fmt.Errorf("expected struct input, got %s", sValue.Kind())
 	}
 
 	t := sValue.Type()
@@ -350,21 +488,28 @@ func InsertFromStruct(dbctx *DBContext, tableName string, data interface{}) (int
 					}
 				}
 
-				fields = append(fields, tagParts[0])
+				quotedField, err := safeMySQLIdent(tagParts[0])
+				if err != nil {
+					return 0, 0, err
+				}
+				fields = append(fields, quotedField)
 				placeholders = append(placeholders, "?")
 				values = append(values, value)
 			}
 		}
 	}
+	if len(fields) == 0 {
+		return 0, 0, fmt.Errorf("no insertable fields found (check db tags / omitempty)")
+	}
 
-	query := fmt.Sprintf("INSERT INTO `%s` (%s) VALUES (%s)",
-		tableName, strings.Join(fields, ", "), strings.Join(placeholders, ", "))
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+		quotedTableName, strings.Join(fields, ", "), strings.Join(placeholders, ", "))
 
 	if dbctx == nil {
 		return 0, 0, fmt.Errorf("nil DB context provided, cannot execute the query")
 	}
 
-	result, execErr := dbctx.Exec(query, values...)
+	result, execErr := execMySQLHelperOperation(ctx, dbctx, "insert_struct", query, values...)
 	if execErr != nil {
 		return 0, 0, execErr
 	}
@@ -395,24 +540,46 @@ func InsertFromStruct(dbctx *DBContext, tableName string, data interface{}) (int
 //   - last insert ID
 //   - error if any.
 func InsertFromMap(dbctx *DBContext, tableName string, data map[string]interface{}) (int64, int64, error) {
+	return InsertFromMapContext(context.Background(), dbctx, tableName, data)
+}
+
+func InsertFromMapContext(ctx context.Context, dbctx *DBContext, tableName string, data map[string]interface{}) (int64, int64, error) {
+	quotedTableName, err := safeMySQLIdent(tableName)
+	if err != nil {
+		return 0, 0, err
+	}
+	if len(data) == 0 {
+		return 0, 0, fmt.Errorf("empty data map")
+	}
+
 	columns := []string{}
 	placeholders := []string{}
 	values := []interface{}{}
 
-	for column, value := range data {
-		columns = append(columns, column)
+	keys := make([]string, 0, len(data))
+	for column := range data {
+		keys = append(keys, column)
+	}
+	sort.Strings(keys)
+
+	for _, column := range keys {
+		quotedColumn, err := safeMySQLIdent(column)
+		if err != nil {
+			return 0, 0, err
+		}
+		columns = append(columns, quotedColumn)
 		placeholders = append(placeholders, "?")
-		values = append(values, value)
+		values = append(values, data[column])
 	}
 
-	query := fmt.Sprintf("INSERT INTO `%s` (%s) VALUES (%s)",
-		tableName, strings.Join(columns, ", "), strings.Join(placeholders, ", "))
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+		quotedTableName, strings.Join(columns, ", "), strings.Join(placeholders, ", "))
 
 	if dbctx == nil {
 		return 0, 0, fmt.Errorf("nil DB context provided, cannot execute the query")
 	}
 
-	result, err := dbctx.Exec(query, values...)
+	result, err := execMySQLHelperOperation(ctx, dbctx, "insert_map", query, values...)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -443,23 +610,48 @@ func InsertFromMap(dbctx *DBContext, tableName string, data map[string]interface
 //   - number of rows affected
 //   - error if any.
 func UpdateFromMap(dbctx *DBContext, tableName string, data map[string]interface{}, where string, params ...interface{}) (int64, error) {
+	return UpdateFromMapContext(context.Background(), dbctx, tableName, data, where, params...)
+}
+
+func UpdateFromMapContext(ctx context.Context, dbctx *DBContext, tableName string, data map[string]interface{}, where string, params ...interface{}) (int64, error) {
+	quotedTableName, err := safeMySQLIdent(tableName)
+	if err != nil {
+		return 0, err
+	}
+	if len(data) == 0 {
+		return 0, fmt.Errorf("empty update map")
+	}
+	if strings.TrimSpace(where) == "" {
+		return 0, fmt.Errorf("where clause cannot be empty")
+	}
+
 	setParts := []string{}
 	values := []interface{}{}
 
-	for column, value := range data {
-		setParts = append(setParts, fmt.Sprintf("%s = ?", column))
-		values = append(values, value)
+	keys := make([]string, 0, len(data))
+	for column := range data {
+		keys = append(keys, column)
+	}
+	sort.Strings(keys)
+
+	for _, column := range keys {
+		quotedColumn, err := safeMySQLIdent(column)
+		if err != nil {
+			return 0, err
+		}
+		setParts = append(setParts, fmt.Sprintf("%s = ?", quotedColumn))
+		values = append(values, data[column])
 	}
 
 	values = append(values, params...)
 
-	query := fmt.Sprintf("UPDATE `%s` SET %s WHERE %s", tableName, strings.Join(setParts, ", "), where)
+	query := fmt.Sprintf("UPDATE %s SET %s WHERE %s", quotedTableName, strings.Join(setParts, ", "), where)
 
 	if dbctx == nil {
 		return 0, fmt.Errorf("nil DB context provided, cannot execute the query")
 	}
 
-	result, err := dbctx.Exec(query, values...)
+	result, err := execMySQLHelperOperation(ctx, dbctx, "update_map", query, values...)
 	if err != nil {
 		return 0, err
 	}
@@ -484,13 +676,26 @@ func UpdateFromMap(dbctx *DBContext, tableName string, data map[string]interface
 //   - number of rows deleted
 //   - error if any.
 func DeleteByPrimaryKey(dbctx *DBContext, tableName, pkColumn string, pkValue interface{}) (int64, error) {
-	query := fmt.Sprintf("DELETE FROM %s WHERE %s = ?", tableName, pkColumn)
+	return DeleteByPrimaryKeyContext(context.Background(), dbctx, tableName, pkColumn, pkValue)
+}
+
+func DeleteByPrimaryKeyContext(ctx context.Context, dbctx *DBContext, tableName, pkColumn string, pkValue interface{}) (int64, error) {
+	quotedTableName, err := safeMySQLIdent(tableName)
+	if err != nil {
+		return 0, err
+	}
+	quotedPKColumn, err := safeMySQLIdent(pkColumn)
+	if err != nil {
+		return 0, err
+	}
+
+	query := fmt.Sprintf("DELETE FROM %s WHERE %s = ?", quotedTableName, quotedPKColumn)
 
 	if dbctx == nil {
 		return 0, fmt.Errorf("nil DB context provided, cannot execute the query")
 	}
 
-	result, err := dbctx.Exec(query, pkValue)
+	result, err := execMySQLHelperOperation(ctx, dbctx, "delete_primary_key", query, pkValue)
 	if err != nil {
 		return 0, err
 	}
@@ -516,13 +721,30 @@ func DeleteByPrimaryKey(dbctx *DBContext, tableName, pkColumn string, pkValue in
 //   - number of rows updated
 //   - error if any.
 func SoftDeleteByPrimaryKey(dbctx *DBContext, tableName, deleteCol, pkCol string, value interface{}) (int64, error) {
-	query := fmt.Sprintf("UPDATE `%s` SET `%s`=1 WHERE `%s` = ?", tableName, deleteCol, pkCol)
+	return SoftDeleteByPrimaryKeyContext(context.Background(), dbctx, tableName, deleteCol, pkCol, value)
+}
+
+func SoftDeleteByPrimaryKeyContext(ctx context.Context, dbctx *DBContext, tableName, deleteCol, pkCol string, value interface{}) (int64, error) {
+	quotedTableName, err := safeMySQLIdent(tableName)
+	if err != nil {
+		return 0, err
+	}
+	quotedDeleteCol, err := safeMySQLIdent(deleteCol)
+	if err != nil {
+		return 0, err
+	}
+	quotedPKCol, err := safeMySQLIdent(pkCol)
+	if err != nil {
+		return 0, err
+	}
+
+	query := fmt.Sprintf("UPDATE %s SET %s = 1 WHERE %s = ?", quotedTableName, quotedDeleteCol, quotedPKCol)
 
 	if dbctx == nil {
 		return 0, fmt.Errorf("nil DB context provided, cannot execute the query")
 	}
 
-	result, err := dbctx.Exec(query, value)
+	result, err := execMySQLHelperOperation(ctx, dbctx, "soft_delete_primary_key", query, value)
 	if err != nil {
 		return 0, err
 	}

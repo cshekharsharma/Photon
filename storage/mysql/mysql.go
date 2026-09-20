@@ -346,6 +346,14 @@ type Tx interface {
 	Query(query string, args ...any) (*sql.Rows, error)
 }
 
+// TxContext is an optional transaction extension for context-aware SQL operations.
+// *sql.Tx implements these methods.
+type TxContext interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	PrepareContext(ctx context.Context, query string) (*sql.Stmt, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
 var (
 
 	// mutex is used to ensure thread-safety when accessing the `instances` map.

@@ -38,10 +38,7 @@ const validConfig = `{
 const invalidConfig = `{}` // will fail schema validation
 
 func resetInitState() {
-	mutex.Lock()
-	defer mutex.Unlock()
-	areFeaturesInitialized = false
-	configCache = nil
+	Close()
 }
 
 func TestInit_WithValidRawBytes(t *testing.T) {
@@ -151,6 +148,21 @@ func TestGetFeatureConfigStore_WithoutInit(t *testing.T) {
 	assert.Contains(t, err.Error(), "not initialized")
 }
 
+func TestCloseClearsFeatureState(t *testing.T) {
+	resetInitState()
+	err := Init(&InitOptions{
+		SourceType: FeatureSourceRawBytes,
+		Input:      validConfig,
+	})
+	require.NoError(t, err)
+
+	Close()
+
+	cfg, err := GetFeatureConfigStore()
+	assert.Error(t, err)
+	assert.Empty(t, cfg.Features)
+}
+
 func TestInit_UnmarshalFailureAfterValidation(t *testing.T) {
 	resetInitState()
 	origValidate := validateFeatureConfig
@@ -181,6 +193,25 @@ func TestInit_Idempotent(t *testing.T) {
 	assert.NoError(t, err1)
 	err2 := Init(&InitOptions{SourceType: FeatureSourceRawBytes, Input: invalidConfig})
 	assert.NoError(t, err2) // should not re-init or fail
+}
+
+func TestInit_ReplacesStaleManager(t *testing.T) {
+	resetInitState()
+	staleManager, err := NewManager(rawFeatureOptions(validConfig))
+	require.NoError(t, err)
+
+	mutex.Lock()
+	featureManager = staleManager
+	areFeaturesInitialized = false
+	mutex.Unlock()
+
+	err = Init(&InitOptions{SourceType: FeatureSourceRawBytes, Input: validConfig})
+	require.NoError(t, err)
+	assert.NotSame(t, staleManager, featureManager)
+
+	cfg, err := staleManager.GetFeatureConfigStore()
+	assert.Error(t, err)
+	assert.Empty(t, cfg.Features)
 }
 
 func Test_populateRequiredOptionsProperties(t *testing.T) {

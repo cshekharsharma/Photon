@@ -17,6 +17,8 @@ func TestDefaultServerOptions_AllScenarios(t *testing.T) {
 		assert.NotNil(t, opts.ServerLogger)
 		assert.Equal(t, 4*1024*1024, opts.MaxRecvMsgSize)
 		assert.Equal(t, 4*1024*1024, opts.MaxSendMsgSize)
+		assert.Equal(t, 2*time.Hour, opts.KeepaliveTime)
+		assert.Equal(t, 20*time.Second, opts.KeepaliveTimeout)
 	})
 
 	t.Run("PartialInput", func(t *testing.T) {
@@ -27,11 +29,13 @@ func TestDefaultServerOptions_AllScenarios(t *testing.T) {
 		})
 
 		input := &ServerOptions{
-			Port:            8443,
-			ShutdownTimeout: 3 * time.Second,
-			ServerLogger:    customLogger,
-			MaxRecvMsgSize:  1024,
-			MaxSendMsgSize:  2048,
+			Port:             8443,
+			ShutdownTimeout:  3 * time.Second,
+			ServerLogger:     customLogger,
+			MaxRecvMsgSize:   1024,
+			MaxSendMsgSize:   2048,
+			KeepaliveTime:    time.Minute,
+			KeepaliveTimeout: 5 * time.Second,
 		}
 
 		opts := DefaultServerOptions(input)
@@ -41,6 +45,8 @@ func TestDefaultServerOptions_AllScenarios(t *testing.T) {
 		assert.Equal(t, customLogger, opts.ServerLogger)
 		assert.Equal(t, 1024, opts.MaxRecvMsgSize)
 		assert.Equal(t, 2048, opts.MaxSendMsgSize)
+		assert.Equal(t, time.Minute, opts.KeepaliveTime)
+		assert.Equal(t, 5*time.Second, opts.KeepaliveTimeout)
 	})
 
 	t.Run("WithZeroValues", func(t *testing.T) {
@@ -62,5 +68,7 @@ func TestDefaultServerOptions_AllScenarios(t *testing.T) {
 		assert.NotNil(t, opts.ServerLogger)
 		assert.Equal(t, 4*1024*1024, opts.MaxRecvMsgSize)
 		assert.Equal(t, 4*1024*1024, opts.MaxSendMsgSize)
+		assert.Equal(t, 2*time.Hour, opts.KeepaliveTime)
+		assert.Equal(t, 20*time.Second, opts.KeepaliveTimeout)
 	})
 }

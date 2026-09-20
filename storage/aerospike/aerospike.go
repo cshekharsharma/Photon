@@ -21,6 +21,7 @@ package aerospike
 
 import (
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -309,8 +310,10 @@ func CloseAll() {
 }
 
 func newDefaultWritePolicy(config *ConnectionConfig, ttl int64) *aero.WritePolicy {
-	aeroTTL := uint32(ttl)
-	if ttl < 0 {
+	var aeroTTL uint32
+	if ttl >= 0 && ttl <= math.MaxUint32 {
+		aeroTTL = uint32(ttl) // #nosec G115 -- range checked above.
+	} else {
 		aeroTTL = DefaultRecordTTL
 		if config != nil && config.DefaultTTL > 0 {
 			aeroTTL = config.DefaultTTL

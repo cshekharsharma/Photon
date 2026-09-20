@@ -35,15 +35,16 @@ func TestExecuteReadQuery(t *testing.T) {
 		assert.ErrorContains(t, err, "nil DB context")
 	})
 
-	t.Run("PrepareFails", func(t *testing.T) {
-		mockConn := new(MockedMySqlDb)
-		mockConn.On("Prepare", "BAD SQL").Return(nil, fmt.Errorf("prepare error"))
-
-		ctx := &DBContext{Conn: mockConn}
+	t.Run("QueryFails", func(t *testing.T) {
+		ctx := &DBContext{
+			QueryContextFn: func(context.Context, string, ...any) (*sql.Rows, error) {
+				return nil, fmt.Errorf("query error")
+			},
+		}
 
 		res, err := ExecuteReadQuery(ctx, ReadQueryInput{Query: "BAD SQL"})
 		assert.Nil(t, res)
-		assert.ErrorContains(t, err, "prepare error")
+		assert.ErrorContains(t, err, "query error")
 	})
 }
 
@@ -205,7 +206,7 @@ func TestMultiInsertFromStructsArray(t *testing.T) {
 		mockResult := new(MockedSqlResult)
 		mockResult.On("RowsAffected").Return(int64(2), nil)
 
-		expectedQuery := "INSERT INTO `test_users` (id, name, email) VALUES (?, ?, DEFAULT), (?, ?, DEFAULT)"
+		expectedQuery := "INSERT INTO `test_users` (`id`, `name`, `email`) VALUES (?, ?, DEFAULT), (?, ?, DEFAULT)"
 		expectedArgs := []interface{}{1, "Alice", 2, "Bob"}
 
 		mockDb := new(MockedMySqlDb)
@@ -279,11 +280,8 @@ func TestMultiInsertFromStructsArray(t *testing.T) {
 		rows, err := MultiInsertFromStructsArray(&DBContext{Cluster: "badquery-cluster"}, "test_users", invalid)
 
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "exec failed")
+		assert.Contains(t, err.Error(), "no insertable fields")
 		assert.Equal(t, int64(0), rows)
-
-		mockDb.AssertExpectations(t)
-		mockConnector.AssertExpectations(t)
 	})
 
 	t.Run("ExecFailure", func(t *testing.T) {
@@ -368,7 +366,7 @@ func TestGenerateMultiInsertQueriesFromStructArray(t *testing.T) {
 		query, values, err := generateMultiInsertQueriesFromStructArray("users", users)
 
 		assert.NoError(t, err)
-		assert.Contains(t, query, "INSERT INTO `users` (id, name, email, meta) VALUES")
+		assert.Contains(t, query, "INSERT INTO `users` (`id`, `name`, `email`, `meta`) VALUES")
 		assert.Equal(t, 8, len(values)) // 4 values per row * 2
 	})
 
@@ -427,6 +425,268 @@ func TestGenerateMultiInsertQueriesFromStructArray(t *testing.T) {
 		assert.NotContains(t, query, "Ignored")
 		assert.Equal(t, 2, len(values)) // Only id from 2 rows
 	})
+}
+
+func TestMySQLIdentifierSafety(t *testing.T) {
+	maliciousIdentifiers := []string{
+		"users; DROP TABLE users",
+		"bad`name",
+		"name desc",
+		"*",
+		"users/*x*/",
+		"",
+		"db.",
+		".table",
+	}
+
+	for _, identifier := range maliciousIdentifiers {
+		t.Run(identifier, func(t *testing.T) {
+			quoted, err := safeMySQLIdent(identifier)
+			assert.Error(t, err)
+			assert.Empty(t, quoted)
+		})
+	}
+
+	quoted, err := safeMySQLIdent("app.users")
+	assert.NoError(t, err)
+	assert.Equal(t, "`app`.`users`", quoted)
+}
+
+func TestMySQLHelpersRejectUnsafeIdentifiersBeforeExecution(t *testing.T) {
+	dbctx := &DBContext{
+		ExecContextFn: func(context.Context, string, ...any) (sql.Result, error) {
+			t.Fatal("ExecContext should not run for unsafe identifiers")
+			return nil, nil
+		},
+	}
+
+	_, _, err := InsertFromMap(dbctx, "users; DROP TABLE users", map[string]interface{}{"name": "Alice"})
+	assert.Error(t, err)
+
+	_, _, err = InsertFromMap(dbctx, "users", map[string]interface{}{"name desc": "Alice"})
+	assert.Error(t, err)
+
+	_, err = UpdateFromMap(dbctx, "users", map[string]interface{}{"bad`name": "Alice"}, "id = ?", 1)
+	assert.Error(t, err)
+
+	_, err = DeleteByPrimaryKey(dbctx, "users/*x*/", "id", 1)
+	assert.Error(t, err)
+
+	_, err = SoftDeleteByPrimaryKey(dbctx, "users", "deleted;DROP", "id", 1)
+	assert.Error(t, err)
+
+	type BadTag struct {
+		Name string `db:"name desc"`
+	}
+	_, _, err = InsertFromStruct(dbctx, "users", BadTag{Name: "Alice"})
+	assert.Error(t, err)
+
+	_, _, err = generateMultiInsertQueriesFromStructArray("users", []BadTag{{Name: "Alice"}})
+	assert.Error(t, err)
+
+	type GoodTag struct {
+		Name string `db:"name"`
+	}
+	_, _, err = generateMultiInsertQueriesFromStructArray("users; DROP TABLE users", []GoodTag{{Name: "Alice"}})
+	assert.Error(t, err)
+
+	_, _, err = InsertFromStruct(dbctx, "users; DROP TABLE users", GoodTag{Name: "Alice"})
+	assert.Error(t, err)
+
+	_, err = UpdateFromMap(dbctx, "users; DROP TABLE users", map[string]interface{}{"name": "Alice"}, "id = ?", 1)
+	assert.Error(t, err)
+
+	_, err = SoftDeleteByPrimaryKey(dbctx, "users; DROP TABLE users", "deleted", "id", 1)
+	assert.Error(t, err)
+}
+
+func TestMySQLHelpersRejectInvalidStructShapes(t *testing.T) {
+	_, _, err := generateMultiInsertQueriesFromStructArray("users", []interface{}{
+		struct {
+			ID int `db:"id"`
+		}{ID: 1},
+		"not-a-struct",
+	})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "expected struct input")
+
+	_, _, err = generateMultiInsertQueriesFromStructArray("users", []string{"not-a-struct"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "expected struct input")
+
+	type GoodTag struct {
+		ID int `db:"id"`
+	}
+	_, _, err = generateMultiInsertQueriesFromStructArray("users", []*GoodTag{nil})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "nil pointer")
+
+	_, _, err = generateMultiInsertQueriesFromStructArray("users", []interface{}{
+		struct {
+			ID int `db:"id"`
+		}{ID: 1},
+		struct {
+			Name string `db:"name"`
+		}{Name: "Alice"},
+	})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "expected struct type")
+
+	_, _, err = InsertFromStruct(&DBContext{}, "users", "not-a-struct")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "expected struct input")
+
+	type EmptyByOmit struct {
+		Name string `db:"name,omitempty"`
+	}
+	_, _, err = InsertFromStruct(&DBContext{}, "users", EmptyByOmit{})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no insertable fields")
+}
+
+func TestMySQLPrimaryKeyHelpersRejectEveryUnsafeIdentifier(t *testing.T) {
+	dbctx := &DBContext{
+		ExecContextFn: func(context.Context, string, ...any) (sql.Result, error) {
+			t.Fatal("ExecContext should not run for unsafe identifiers")
+			return nil, nil
+		},
+	}
+
+	_, err := DeleteByPrimaryKey(dbctx, "users", "id;DROP", 1)
+	assert.Error(t, err)
+
+	_, err = SoftDeleteByPrimaryKey(dbctx, "users", "deleted", "id desc", 1)
+	assert.Error(t, err)
+}
+
+func TestMySQLMapHelpersAreDeterministicAndParameterized(t *testing.T) {
+	const injectedValue = "Robert'); DROP TABLE users;--"
+	data := map[string]interface{}{
+		"z_col": injectedValue,
+		"a_col": 101,
+	}
+
+	var capturedQuery string
+	var capturedArgs []any
+	dbctx := &DBContext{
+		ExecContextFn: func(_ context.Context, query string, args ...any) (sql.Result, error) {
+			capturedQuery = query
+			capturedArgs = append([]any(nil), args...)
+			result := new(MockedSqlResult)
+			result.On("RowsAffected").Return(int64(1), nil)
+			result.On("LastInsertId").Return(int64(10), nil)
+			return result, nil
+		},
+	}
+
+	for i := 0; i < 5; i++ {
+		capturedQuery = ""
+		capturedArgs = nil
+		rows, id, err := InsertFromMap(dbctx, "users", data)
+		assert.NoError(t, err)
+		assert.Equal(t, int64(1), rows)
+		assert.Equal(t, int64(10), id)
+		assert.Equal(t, "INSERT INTO `users` (`a_col`, `z_col`) VALUES (?, ?)", capturedQuery)
+		assert.Equal(t, []any{101, injectedValue}, capturedArgs)
+		assert.NotContains(t, capturedQuery, injectedValue)
+	}
+
+	capturedQuery = ""
+	capturedArgs = nil
+	rows, err := UpdateFromMap(dbctx, "users", data, "id = ?", 77)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(1), rows)
+	assert.Equal(t, "UPDATE `users` SET `a_col` = ?, `z_col` = ? WHERE id = ?", capturedQuery)
+	assert.Equal(t, []any{101, injectedValue, 77}, capturedArgs)
+	assert.NotContains(t, capturedQuery, injectedValue)
+}
+
+func TestMySQLHelperOperationHook(t *testing.T) {
+	original := mysqlHelperOperationHook
+	t.Cleanup(func() {
+		mysqlHelperOperationHook = original
+	})
+
+	events := make([]mysqlHelperOperationEvent, 0, 2)
+	mysqlHelperOperationHook = func(event mysqlHelperOperationEvent) {
+		events = append(events, event)
+	}
+
+	mockResult := new(MockResult)
+	execParams := []interface{}{"alice", 7}
+	execDB := &DBContext{
+		ExecContextFn: func(ctx context.Context, query string, args ...any) (sql.Result, error) {
+			assert.NoError(t, ctx.Err())
+			assert.Equal(t, "INSERT INTO `users` (`name`, `id`) VALUES (?, ?)", query)
+			assert.Equal(t, execParams, args)
+			return mockResult, nil
+		},
+	}
+
+	result, err := execMySQLHelperOperation(
+		context.Background(),
+		execDB,
+		"insert_map",
+		"INSERT INTO `users` (`name`, `id`) VALUES (?, ?)",
+		execParams...,
+	)
+	assert.NoError(t, err)
+	assert.Equal(t, mockResult, result)
+	execParams[0] = "mutated-after-hook"
+
+	queryErr := assert.AnError
+	queryDB := &DBContext{
+		QueryContextFn: func(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+			assert.NoError(t, ctx.Err())
+			assert.Equal(t, "SELECT * FROM `users` WHERE `id` = ?", query)
+			assert.Equal(t, []interface{}{7}, args)
+			return nil, queryErr
+		},
+	}
+
+	rows, err := queryMySQLHelperOperation(
+		context.Background(),
+		queryDB,
+		"execute_read",
+		"SELECT * FROM `users` WHERE `id` = ?",
+		7,
+	)
+	assert.Nil(t, rows)
+	assert.ErrorIs(t, err, queryErr)
+
+	assert.Len(t, events, 2)
+	assert.Equal(t, "insert_map", events[0].Operation)
+	assert.Equal(t, "INSERT INTO `users` (`name`, `id`) VALUES (?, ?)", events[0].Query)
+	assert.Equal(t, []interface{}{"alice", 7}, events[0].Args)
+	assert.NoError(t, events[0].Err)
+	assert.Equal(t, "execute_read", events[1].Operation)
+	assert.Equal(t, "SELECT * FROM `users` WHERE `id` = ?", events[1].Query)
+	assert.Equal(t, []interface{}{7}, events[1].Args)
+	assert.ErrorIs(t, events[1].Err, queryErr)
+}
+
+func TestUpdateFromMapRejectsEmptyInputs(t *testing.T) {
+	dbctx := &DBContext{
+		ExecContextFn: func(context.Context, string, ...any) (sql.Result, error) {
+			t.Fatal("ExecContext should not run for invalid update input")
+			return nil, nil
+		},
+	}
+
+	rows, err := UpdateFromMap(dbctx, "users", map[string]interface{}{}, "id = ?", 1)
+	assert.Error(t, err)
+	assert.Equal(t, int64(0), rows)
+
+	rows, err = UpdateFromMap(dbctx, "users", map[string]interface{}{"name": "Alice"}, "   ", 1)
+	assert.Error(t, err)
+	assert.Equal(t, int64(0), rows)
+}
+
+func TestInsertFromMapNilDBContextAfterValidSQL(t *testing.T) {
+	rows, id, err := InsertFromMap(nil, "users", map[string]interface{}{"name": "Alice"})
+	assert.Error(t, err)
+	assert.Equal(t, int64(0), rows)
+	assert.Equal(t, int64(0), id)
 }
 
 func TestGetParameterizedInClause(t *testing.T) {
@@ -644,7 +904,7 @@ func TestUpdateFromMap(t *testing.T) {
 	whereClause := "id = ?"
 	data := map[string]interface{}{"name": "Charlie"}
 	params := []interface{}{101}
-	expectedQuery := "UPDATE `test_table` SET name = ? WHERE id = ?"
+	expectedQuery := "UPDATE `test_table` SET `name` = ? WHERE id = ?"
 	expectedArgs := []interface{}{"Charlie", 101}
 
 	t.Run("InvalidDBContext", func(t *testing.T) {
@@ -726,7 +986,7 @@ func TestUpdateFromMap(t *testing.T) {
 func TestInsertFromMap(t *testing.T) {
 	cluster := "test_cluster"
 	tableName := "test_table"
-	query := "INSERT INTO `test_table` (name) VALUES (?)"
+	query := "INSERT INTO `test_table` (`name`) VALUES (?)"
 	data := map[string]interface{}{"name": "Bob"}
 
 	t.Run("InvalidDBContext", func(t *testing.T) {
@@ -844,7 +1104,7 @@ func TestInsertFromStruct(t *testing.T) {
 		mockResult.On("LastInsertId").Return(int64(1001), nil)
 
 		mockDb := new(MockedMySqlDb)
-		expectedQuery := "INSERT INTO `users` (id, name, meta) VALUES (?, ?, ?)"
+		expectedQuery := "INSERT INTO `users` (`id`, `name`, `meta`) VALUES (?, ?, ?)"
 		mockDb.On("Exec", expectedQuery, mock.Anything).Return(mockResult, nil)
 
 		connectionConfigMap = map[string]*ConnectionConfig{"test-cluster": {}}
@@ -928,7 +1188,7 @@ func TestInsertFromStruct(t *testing.T) {
 }
 
 func TestDeleteByPrimaryKey(t *testing.T) {
-	query := "DELETE FROM test_table WHERE id = ?"
+	query := "DELETE FROM `test_table` WHERE `id` = ?"
 
 	t.Run("InvalidDBContext", func(t *testing.T) {
 		_, err := DeleteByPrimaryKey(nil, "test_table", "id", 101)
@@ -1006,7 +1266,7 @@ func TestDeleteByPrimaryKey(t *testing.T) {
 }
 
 func TestSoftDeleteByPrimaryKey(t *testing.T) {
-	query := "UPDATE `test_table` SET `is_deleted`=1 WHERE `id` = ?"
+	query := "UPDATE `test_table` SET `is_deleted` = 1 WHERE `id` = ?"
 
 	t.Run("InvalidDBContext", func(t *testing.T) {
 		_, err := SoftDeleteByPrimaryKey(nil, "test_table", "is_deleted", "id", 101)

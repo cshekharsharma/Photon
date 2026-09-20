@@ -58,6 +58,7 @@ func (m *Manager) Close() {
 		m.cancel()
 		m.cancel = nil
 	}
+	m.config = nil
 }
 
 func (m *Manager) reload(entry *watcher.UpdaterSchema) error {

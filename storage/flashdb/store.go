@@ -20,6 +20,7 @@ package flashdb
 import (
 	"errors"
 	"hash/fnv"
+	"math"
 	"sync"
 	"time"
 
@@ -120,7 +121,7 @@ func (s *Store) shardFor(key string) *shard {
 	hasher := fnv.New32a()
 	_, _ = hasher.Write([]byte(key))
 
-	shardIndex := hasher.Sum32() % uint32(len(s.shards))
+	shardIndex := hasher.Sum32() % uint32(len(s.shards)) // #nosec G115 -- shard count is validated positive and bounded by memory allocation.
 	return s.shards[shardIndex]
 }
 
@@ -237,10 +238,10 @@ func (s *Store) Set(key string, value map[string]any, ttl time.Duration) (bool, 
 			old := record.size
 
 			if newSize >= old {
-				delta = uint64(newSize - old)
+				delta = nonNegativeInt64ToUint64(newSize - old)
 				shard.currentSize += delta
 			} else {
-				shard.currentSize -= uint64(old - newSize)
+				shard.currentSize -= nonNegativeInt64ToUint64(old - newSize)
 			}
 		}
 
@@ -262,13 +263,15 @@ func (s *Store) Set(key string, value map[string]any, ttl time.Duration) (bool, 
 		return true, nil
 	}
 
+	newCost := nonNegativeInt64ToUint64(newSize)
+
 	// Reject items that can never fit this shard alone.
-	if uint64(newSize) > shard.capacity {
+	if newCost > shard.capacity {
 		return false, nil
 	}
 
 	// While we don't have room, compare admission vs. LRU victim and evict if admitted.
-	for shard.isFullAfter(uint64(newSize)) {
+	for shard.isFullAfter(newCost) {
 		vk, ok := shard.tailKeyLocked()
 
 		if !ok { // No victim to evict; bail
@@ -285,7 +288,7 @@ func (s *Store) Set(key string, value map[string]any, ttl time.Duration) (bool, 
 
 	// Insert
 	shard.data[key] = &record{value: clone(value), size: newSize, expiry: exp}
-	shard.currentSize += uint64(newSize)
+	shard.currentSize += newCost
 	shard.lru.Set(key, struct{}{})
 
 	return true, nil
@@ -487,9 +490,9 @@ func (s *Store) Append(key string, appends map[string]string) error {
 	old := record.size
 	newSize := computeSize(key, record.value)
 	if newSize >= old {
-		shard.currentSize += uint64(newSize - old)
+		shard.currentSize += nonNegativeInt64ToUint64(newSize - old)
 	} else {
-		shard.currentSize -= uint64(old - newSize)
+		shard.currentSize -= nonNegativeInt64ToUint64(old - newSize)
 	}
 	record.size = newSize
 
@@ -510,6 +513,20 @@ func (s *Store) Append(key string, appends map[string]string) error {
 
 	shard.mu.Unlock()
 	return nil
+}
+
+func nonNegativeInt64ToUint64(v int64) uint64 {
+	if v <= 0 {
+		return 0
+	}
+	return uint64(v) // #nosec G115 -- negative values are clamped above.
+}
+
+func int64ToInt32(v int64) (int32, bool) {
+	if v < math.MinInt32 || v > math.MaxInt32 {
+		return 0, false
+	}
+	return int32(v), true // #nosec G115 -- range checked above.
 }
 
 // GetTTL returns the remaining TTL (in seconds) for key.

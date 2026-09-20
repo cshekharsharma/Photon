@@ -55,3 +55,31 @@ func TestRecoverInterceptor_WithPanic(t *testing.T) {
 	assert.Equal(t, codes.Internal, status.Code(err))
 	assert.Contains(t, err.Error(), "internal server error")
 }
+
+func TestStreamRecoverInterceptor_NoPanic(t *testing.T) {
+	buff := &bytes.Buffer{}
+	interceptor := StreamRecoverInterceptor(getLogger("TestStreamRecoverInterceptor_NoPanic", buff))
+
+	err := interceptor(nil, &testServerStream{ctx: context.Background()}, &grpc.StreamServerInfo{
+		FullMethod: "/test.StreamSafeMethod",
+	}, func(_ interface{}, _ grpc.ServerStream) error {
+		return nil
+	})
+
+	assert.NoError(t, err)
+}
+
+func TestStreamRecoverInterceptor_WithPanic(t *testing.T) {
+	buff := &bytes.Buffer{}
+	interceptor := StreamRecoverInterceptor(getLogger("TestStreamRecoverInterceptor_WithPanic", buff))
+
+	err := interceptor(nil, &testServerStream{ctx: context.Background()}, &grpc.StreamServerInfo{
+		FullMethod: "/test.StreamPanicMethod",
+	}, func(_ interface{}, _ grpc.ServerStream) error {
+		panic("stream broke")
+	})
+
+	assert.Error(t, err)
+	assert.Equal(t, codes.Internal, status.Code(err))
+	assert.Contains(t, err.Error(), "internal server error")
+}

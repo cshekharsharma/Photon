@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -24,7 +25,12 @@ import (
 type RedisLocker struct {
 	storageclient           redis.RedisInterface
 	defaultLockRetryTimeout time.Duration
-	lockStore               sync.Map // Map of [Key -> LockUUID] for local tracking
+	lockStore               sync.Map // Map of [Key -> redisLockState] for local tracking
+}
+
+type redisLockState struct {
+	value string
+	token uint64
 }
 
 // Lock attempts to acquire a distributed lock on the specified key with the given expiry.
@@ -35,36 +41,67 @@ type RedisLocker struct {
 //   - expiry: How long the lock should live.
 //   - retryInterval: Time to wait before retrying if the lock is already held.
 //
-// Returns an error if the lock could not be acquired before context timeout/cancellation.
+// Returns the fencing token and an error if the lock could not be acquired before
+// context timeout/cancellation.
 //
-// Internally uses Redis SETNX operation to ensure safe lock acquisition.
-func (d *RedisLocker) Lock(ctx context.Context, key string, expiry time.Duration, retryInterval time.Duration) error {
-	lockValue := uuid.NewString()
+// Internally uses Redis Lua scripting to atomically acquire ownership and issue
+// a fencing token.
+func (d *RedisLocker) Lock(
+	ctx context.Context,
+	key string,
+	expiry time.Duration,
+	retryInterval time.Duration,
+) (uint64, error) {
+	if expiry <= 0 {
+		return 0, errors.New("lock expiry must be positive")
+	}
+	if retryInterval <= 0 {
+		retryInterval = defaultLockRetryInterval
+	}
+	owner := uuid.NewString()
+	expiryMillis := durationMilliseconds(expiry)
 
-	// Ensuøre context has a deadline to avoid infinite looping
+	// Ensure context has a deadline to avoid infinite looping.
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 10*time.Second) // Default internal timeout if caller didn't specify
+		timeout := d.defaultLockRetryTimeout
+		if timeout <= 0 {
+			timeout = defaultLockRetryTimeout
+		}
+		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
 
 	for {
-		ok, err := d.storageclient.GetClient().SetNX(ctx, key, lockValue, expiry).Result()
+		token, err := d.tryAcquire(ctx, key, owner, expiryMillis)
 		if err != nil {
-			return fmt.Errorf("distributed lock acquisition failed for key '%s': %w", key, err)
+			return 0, fmt.Errorf("distributed lock acquisition failed for key '%s': %w", key, err)
 		}
-		if ok {
-			d.lockStore.Store(key, lockValue)
-			return nil
+		if token > 0 {
+			d.lockStore.Store(key, redisLockState{
+				value: lockValue(token, owner),
+				token: token,
+			})
+			return token, nil
 		}
 
+		timer := time.NewTimer(retryInterval)
 		select {
 		case <-ctx.Done():
-			return ErrLockNotAcquired
-		case <-time.After(retryInterval):
-			// Retry after interval
+			timer.Stop()
+			return 0, ErrLockNotAcquired
+		case <-timer.C:
 		}
 	}
+}
+
+// FencingToken returns the locally held fencing token for key.
+func (d *RedisLocker) FencingToken(key string) (uint64, bool) {
+	state, ok := d.lockState(key)
+	if !ok || state.token == 0 {
+		return 0, false
+	}
+	return state.token, true
 }
 
 // Unlock safely releases a lock on the specified key.
@@ -78,7 +115,10 @@ func (d *RedisLocker) Unlock(ctx context.Context, key string) error {
 	if !ok {
 		return ErrLockNotHeld
 	}
-	lockValue, _ := valueRaw.(string)
+	state, ok := redisLockStateFromValue(valueRaw)
+	if !ok {
+		return ErrLockNotHeld
+	}
 
 	const luaScript = `
 		if redis.call("GET", KEYS[1]) == ARGV[1] then
@@ -88,12 +128,17 @@ func (d *RedisLocker) Unlock(ctx context.Context, key string) error {
 		end
 	`
 
-	res, err := d.storageclient.GetClient().Eval(ctx, luaScript, []string{key}, lockValue).Result()
+	res, err := d.storageclient.GetClient().Eval(ctx, luaScript, []string{key}, state.value).Result()
 	if err != nil {
 		return err
 	}
 
-	if res.(int64) == 0 {
+	intRes, ok := res.(int64)
+	if !ok {
+		return errors.New("unexpected result type from Eval")
+	}
+	if intRes == 0 {
+		d.lockStore.Delete(key)
 		return ErrLockNotHeld
 	}
 
@@ -113,11 +158,18 @@ func (d *RedisLocker) Unlock(ctx context.Context, key string) error {
 //
 // Returns an error if the lock is not held locally or renewal fails.
 func (d *RedisLocker) Extend(ctx context.Context, key string, extension time.Duration) error {
+	if extension <= 0 {
+		return errors.New("lock extension must be positive")
+	}
+
 	valueRaw, ok := d.lockStore.Load(key)
 	if !ok {
 		return ErrLockNotHeld
 	}
-	lockValue, _ := valueRaw.(string)
+	state, ok := redisLockStateFromValue(valueRaw)
+	if !ok {
+		return ErrLockNotHeld
+	}
 
 	const luaScript = `
 		if redis.call("GET", KEYS[1]) == ARGV[1] then
@@ -127,8 +179,8 @@ func (d *RedisLocker) Extend(ctx context.Context, key string, extension time.Dur
 		end
 	`
 
-	millis := int64(extension / time.Millisecond)
-	cmd := d.storageclient.GetClient().Eval(ctx, luaScript, []string{key}, lockValue, millis)
+	millis := durationMilliseconds(extension)
+	cmd := d.storageclient.GetClient().Eval(ctx, luaScript, []string{key}, state.value, millis)
 
 	if cmd == nil {
 		return errors.New("internal error in redis command")
@@ -145,8 +197,82 @@ func (d *RedisLocker) Extend(ctx context.Context, key string, extension time.Dur
 	}
 
 	if intRes == 0 {
+		d.lockStore.Delete(key)
 		return ErrLockNotHeld
 	}
 
 	return nil
+}
+
+func (d *RedisLocker) tryAcquire(ctx context.Context, key string, owner string, expiryMillis int64) (uint64, error) {
+	const luaScript = `
+		if redis.call("EXISTS", KEYS[1]) == 1 then
+			return 0
+		end
+		local token = redis.call("INCR", KEYS[2])
+		redis.call("PSETEX", KEYS[1], ARGV[1], token .. ":" .. ARGV[2])
+		return token
+	`
+
+	res, err := d.storageclient.GetClient().
+		Eval(ctx, luaScript, []string{key, fencingCounterKey(key)}, expiryMillis, owner).
+		Result()
+	if err != nil {
+		return 0, err
+	}
+	return positiveUint64(res)
+}
+
+func (d *RedisLocker) lockState(key string) (redisLockState, bool) {
+	valueRaw, ok := d.lockStore.Load(key)
+	if !ok {
+		return redisLockState{}, false
+	}
+	return redisLockStateFromValue(valueRaw)
+}
+
+func redisLockStateFromValue(value any) (redisLockState, bool) {
+	switch typed := value.(type) {
+	case redisLockState:
+		return typed, typed.value != ""
+	case string:
+		return redisLockState{value: typed}, typed != ""
+	default:
+		return redisLockState{}, false
+	}
+}
+
+func positiveUint64(value any) (uint64, error) {
+	switch typed := value.(type) {
+	case int64:
+		if typed < 0 {
+			return 0, errors.New("unexpected negative fencing token")
+		}
+		return strconv.ParseUint(strconv.FormatInt(typed, 10), 10, 64)
+	case uint64:
+		return typed, nil
+	case int:
+		if typed < 0 {
+			return 0, errors.New("unexpected negative fencing token")
+		}
+		return strconv.ParseUint(strconv.Itoa(typed), 10, 64)
+	default:
+		return 0, errors.New("unexpected result type from Eval")
+	}
+}
+
+func durationMilliseconds(duration time.Duration) int64 {
+	millis := duration / time.Millisecond
+	if duration%time.Millisecond != 0 {
+		millis++
+	}
+	return int64(millis)
+}
+
+func lockValue(token uint64, owner string) string {
+	return strconv.FormatUint(token, 10) + ":" + owner
+}
+
+func fencingCounterKey(key string) string {
+	return key + ":fence"
 }

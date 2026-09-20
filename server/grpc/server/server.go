@@ -1,10 +1,12 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
-	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/reflection"
 )
 
@@ -35,7 +38,29 @@ type stoppableServer interface {
 // register the application-specific services. Any missing options are populated with defaults
 // via DefaultServerOptions.
 func StartGRPCServer(opts *ServerOptions) error {
+	ctx, stop := signal.NotifyContext(
+		context.Background(),
+		syscall.SIGINT,
+		syscall.SIGTERM,
+		syscall.SIGHUP,
+		syscall.SIGQUIT,
+	)
+	defer stop()
+	return StartGRPCServerContext(ctx, opts)
+}
+
+// StartGRPCServerContext starts a gRPC server and shuts it down when ctx is canceled.
+func StartGRPCServerContext(ctx context.Context, opts *ServerOptions) error {
 	opts = DefaultServerOptions(opts)
+
+	if opts.TLSConfig == nil && !opts.Insecure {
+		return errors.New("gRPC server requires TLSConfig unless Insecure is true")
+	}
+	if opts.EnableReflection &&
+		strings.EqualFold(strings.TrimSpace(opts.Environment), ProductionEnvironment) &&
+		!opts.AllowReflectionInProduction {
+		return errors.New("gRPC reflection requires AllowReflectionInProduction in production")
+	}
 
 	listenAddr := fmt.Sprintf(":%d", opts.Port)
 	lis, err := net.Listen(networkTCP, listenAddr)
@@ -48,7 +73,7 @@ func StartGRPCServer(opts *ServerOptions) error {
 	// set TLS or insecure credentials
 	if opts.TLSConfig != nil {
 		grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(opts.TLSConfig)))
-	} else {
+	} else if opts.Insecure {
 		grpcOpts = append(grpcOpts, grpc.Creds(insecure.NewCredentials()))
 	}
 
@@ -66,14 +91,23 @@ func StartGRPCServer(opts *ServerOptions) error {
 	)
 	grpcOpts = append(grpcOpts, grpc.ChainUnaryInterceptor(unaryInterceptors...))
 
-	if len(opts.StreamInterceptors) > 0 {
-		grpcOpts = append(grpcOpts, grpc.ChainStreamInterceptor(opts.StreamInterceptors...))
-	}
+	streamInterceptors := make([]grpc.StreamServerInterceptor, 0, len(opts.StreamInterceptors)+3)
+	streamInterceptors = append(streamInterceptors, opts.StreamInterceptors...)
+	streamInterceptors = append(streamInterceptors,
+		interceptors.StreamRequestIDInterceptor(),
+		interceptors.StreamLoggingInterceptor(opts.ServerLogger),
+		interceptors.StreamRecoverInterceptor(opts.ServerLogger),
+	)
+	grpcOpts = append(grpcOpts, grpc.ChainStreamInterceptor(streamInterceptors...))
 
 	// Set message size limits
 	grpcOpts = append(grpcOpts,
 		grpc.MaxRecvMsgSize(opts.MaxRecvMsgSize),
 		grpc.MaxSendMsgSize(opts.MaxSendMsgSize),
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:    opts.KeepaliveTime,
+			Timeout: opts.KeepaliveTimeout,
+		}),
 	)
 
 	grpcServer := grpc.NewServer(grpcOpts...)
@@ -96,24 +130,18 @@ func StartGRPCServer(opts *ServerOptions) error {
 		errChan <- grpcServeFn(grpcServer, lis)
 	}()
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(
-		sigChan,
-		syscall.SIGINT,
-		syscall.SIGTERM,
-		syscall.SIGHUP,
-		syscall.SIGQUIT,
-	)
-
 	select {
-	case sig := <-sigChan:
-		opts.ServerLogger.Info("Received shutdown signal: %v", sig)
+	case <-ctx.Done():
+		opts.ServerLogger.Info("gRPC server shutdown requested")
 		if opts.ShutdownHook != nil {
 			opts.ShutdownHook()
 		}
 		stopGracefully(grpcServer, opts.ShutdownTimeout, opts.ServerLogger)
 		return nil
 	case err := <-errChan:
+		if err == nil || errors.Is(err, grpc.ErrServerStopped) {
+			return nil
+		}
 		return fmt.Errorf("gRPC server error: %w", err)
 	}
 }

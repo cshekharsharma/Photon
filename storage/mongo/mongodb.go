@@ -367,7 +367,7 @@ func newInstanceWithConfigContext(ctx context.Context, connector MongoConnector,
 	clientOpts.SetRetryWrites(true)
 	clientOpts.SetWriteConcern(writeconcern.Majority())
 	clientOpts.SetConnectTimeout(cfg.ConnectionTimeout)
-	clientOpts.SetMaxPoolSize(uint64(cfg.ConnectionPoolsize))
+	clientOpts.SetMaxPoolSize(uint64(cfg.ConnectionPoolsize)) // #nosec G115 -- config validation rejects negatives.
 
 	// Create a new client and connect to the server
 	return connector.Connect(ctx, clientOpts)
@@ -396,7 +396,7 @@ func getMaxConnectionPoolSize(clusterName string) uint64 {
 
 	if config, ok := connectionConfigMap[clusterName]; ok && config != nil {
 		if config.ConnectionPoolsize > 0 {
-			return uint64(config.ConnectionPoolsize)
+			return uint64(config.ConnectionPoolsize) // #nosec G115 -- positive value checked above.
 		}
 	}
 	return DefaultConnectionPoolSize

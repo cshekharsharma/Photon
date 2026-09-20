@@ -2,6 +2,7 @@ package system
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"reflect"
 	"runtime"
@@ -59,7 +60,7 @@ func GetInMemorySizeInBytes(v interface{}) (int64, error) {
 	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
 		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
 		reflect.Float32, reflect.Float64:
-		return int64(val.Type().Size()), nil
+		return uintptrToInt64(val.Type().Size()), nil
 
 	case reflect.String:
 		return stringHeader + int64(len(val.String())), nil
@@ -109,13 +110,18 @@ func GetInMemorySizeInBytes(v interface{}) (int64, error) {
 		return ptrSize + elemSize, nil
 
 	case reflect.Struct:
-		var structSize int64
-		structSize = int64(val.Type().Size())
-		return structSize, nil
+		return uintptrToInt64(val.Type().Size()), nil
 
 	default:
 		return 0, fmt.Errorf("unsupported type: %s", val.Kind())
 	}
+}
+
+func uintptrToInt64(v uintptr) int64 {
+	if v > uintptr(math.MaxInt64) {
+		return math.MaxInt64
+	}
+	return int64(v) // #nosec G115 -- upper bound checked above.
 }
 
 // net.Interfaces wrapper

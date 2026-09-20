@@ -116,6 +116,19 @@ func GetFeatureConfigStore() (*FeatureConfig, error) {
 	return configCache, nil
 }
 
+// Close stops the active feature manager and clears package-level state.
+func Close() {
+	mutex.Lock()
+	defer mutex.Unlock()
+
+	if featureManager != nil {
+		featureManager.Close()
+	}
+	featureManager = nil
+	configCache = nil
+	areFeaturesInitialized = false
+}
+
 // populateRequiredOptionsProperties populates required properties in the options.
 // It sets default values for the logger if not provided and ensures the watcher options are initialized.
 // This function is called during the initialization of the feature config to ensure

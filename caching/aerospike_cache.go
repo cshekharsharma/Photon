@@ -1,8 +1,11 @@
 package caching
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"math"
+	"time"
 
 	aerov8 "github.com/aerospike/aerospike-client-go/v8"
 	"github.com/aerospike/aerospike-client-go/v8/types"
@@ -38,9 +41,9 @@ var (
 // NewAerospikeCache creates a new AerospikeCache instance using the provided options.
 // It establishes a connection with the Aerospike server based on the specified cluster.
 func NewAerospikeCache(opts *Options, connector aerospike.AerospikeConnectorInterface) (*AerospikeCache, error) {
-	sanitizedTTL := uint32(opts.DefaultTTL)
-	if opts.DefaultTTL < 0 {
-		sanitizedTTL = aerospike.DefaultRecordTTL
+	sanitizedTTL, err := aerospikeTTL(opts.DefaultTTL)
+	if err != nil {
+		return nil, err
 	}
 
 	aerospike.SetConnectionConfig(opts.Cluster, &aerospike.ConnectionConfig{
@@ -68,9 +71,57 @@ func NewAerospikeCache(opts *Options, connector aerospike.AerospikeConnectorInte
 	return aerocache, nil
 }
 
+func aerospikeReadPolicyForContext(ctx context.Context) *aerov8.BasePolicy {
+	policy := aerov8.NewPolicy()
+	applyAerospikeDeadline(ctx, policy)
+	return policy
+}
+
+func aerospikeBatchPolicyForContext(ctx context.Context) *aerov8.BatchPolicy {
+	policy := aerov8.NewBatchPolicy()
+	applyAerospikeDeadline(ctx, &policy.BasePolicy)
+	return policy
+}
+
+func aerospikeWritePolicyForContext(ctx context.Context, clusterName string, ttl int64) *aerov8.WritePolicy {
+	policy := aerospike.GetClusterDefaultWritePolicy(clusterName, ttl)
+	applyAerospikeDeadline(ctx, &policy.BasePolicy)
+	return policy
+}
+
+func applyAerospikeDeadline(ctx context.Context, policy *aerov8.BasePolicy) {
+	if policy == nil {
+		return
+	}
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return
+	}
+
+	timeout := time.Until(deadline)
+	if timeout <= 0 {
+		timeout = time.Nanosecond
+	}
+
+	policy.TotalTimeout = timeout
+	if policy.SocketTimeout == 0 || policy.SocketTimeout > timeout {
+		policy.SocketTimeout = timeout
+	}
+}
+
 // Exists checks if a given key exists in the Aerospike store using the provided ExistsRequest.
 // Returns true if the key exists, otherwise false with an error if any occurs.
 func (a *AerospikeCache) Exists(request *ExistsRequest) (bool, error) {
+	return a.ExistsContext(context.Background(), request)
+}
+
+func (a *AerospikeCache) ExistsContext(ctx context.Context, request *ExistsRequest) (bool, error) {
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return false, err
+	}
+
 	verifiedRequest, err := a.verifyRequest(request)
 	if err != nil {
 		return false, err
@@ -83,7 +134,7 @@ func (a *AerospikeCache) Exists(request *ExistsRequest) (bool, error) {
 		return false, fmt.Errorf("failed to create aerospike key: %w", err)
 	}
 
-	exists, err := a.aero.GetClient().Exists(nil, aerospikeKey)
+	exists, err := a.aero.GetClient().Exists(aerospikeReadPolicyForContext(ctx), aerospikeKey)
 	if err != nil {
 		return false, fmt.Errorf("aerospike::exists() failed: %w", err)
 	}
@@ -94,6 +145,15 @@ func (a *AerospikeCache) Exists(request *ExistsRequest) (bool, error) {
 // Get retrieves the value for a given key and optional fields from Aerospike using the provided GetRequest.
 // Returns the bin map associated with the key, or an error if the retrieval fails.
 func (a *AerospikeCache) Get(request *GetRequest) (any, error) {
+	return a.GetContext(context.Background(), request)
+}
+
+func (a *AerospikeCache) GetContext(ctx context.Context, request *GetRequest) (any, error) {
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	verifiedRequest, err := a.verifyRequest(request)
 	if err != nil {
 		return false, err
@@ -106,7 +166,7 @@ func (a *AerospikeCache) Get(request *GetRequest) (any, error) {
 		return false, fmt.Errorf("failed to create aerospike key: %w", err)
 	}
 
-	record, err := a.aero.GetClient().Get(nil, aerospikeKey, request.Fields...)
+	record, err := a.aero.GetClient().Get(aerospikeReadPolicyForContext(ctx), aerospikeKey, request.Fields...)
 	if err != nil {
 		return nil, fmt.Errorf("aerospike::get() failed: %w", err)
 	}
@@ -117,19 +177,31 @@ func (a *AerospikeCache) Get(request *GetRequest) (any, error) {
 // Set stores the given fields in Aerospike under the specified key using the SetRequest.
 // Returns true on successful set, or false and an error if the operation fails.
 func (a *AerospikeCache) Set(request *SetRequest) (bool, error) {
+	return a.SetContext(context.Background(), request)
+}
+
+func (a *AerospikeCache) SetContext(ctx context.Context, request *SetRequest) (bool, error) {
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return false, err
+	}
+
 	verifiedRequest, err := a.verifyRequest(request)
 	if err != nil {
 		return false, err
 	}
 
 	request, _ = verifiedRequest.(*SetRequest)
+	if _, err := aerospikeTTL(request.TTL); err != nil {
+		return false, err
+	}
 
 	aerospikeKey, err := aerospikeNewKey(request.Namespace, request.Collection, request.Key)
 	if err != nil {
 		return false, fmt.Errorf("failed to create aerospike key: %w", err)
 	}
 
-	writePolicy := aerospike.GetClusterDefaultWritePolicy(request.Namespace, request.TTL)
+	writePolicy := aerospikeWritePolicyForContext(ctx, request.Namespace, request.TTL)
 
 	err = a.aero.GetClient().Put(writePolicy, aerospikeKey, request.Fields)
 	if err != nil {
@@ -142,6 +214,15 @@ func (a *AerospikeCache) Set(request *SetRequest) (bool, error) {
 // Delete removes a record from Aerospike for the specified key provided in the DeleteRequest.
 // Returns true if the key was deleted, false otherwise along with an error.
 func (a *AerospikeCache) Delete(request *DeleteRequest) (bool, error) {
+	return a.DeleteContext(context.Background(), request)
+}
+
+func (a *AerospikeCache) DeleteContext(ctx context.Context, request *DeleteRequest) (bool, error) {
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return false, err
+	}
+
 	verifiedRequest, err := a.verifyRequest(request)
 	if err != nil {
 		return false, err
@@ -154,7 +235,7 @@ func (a *AerospikeCache) Delete(request *DeleteRequest) (bool, error) {
 		return false, fmt.Errorf("failed to create aerospike key: %w", err)
 	}
 
-	deleted, err := a.aero.GetClient().Delete(nil, aerospikeKey)
+	deleted, err := a.aero.GetClient().Delete(aerospikeWritePolicyForContext(ctx, request.Namespace, -1), aerospikeKey)
 	if err != nil {
 		return false, fmt.Errorf("aerospike::delete() failed: %w", err)
 	}
@@ -165,6 +246,15 @@ func (a *AerospikeCache) Delete(request *DeleteRequest) (bool, error) {
 // MultiGet retrieves multiple records from Aerospike for a list of keys provided in the MultiGetRequest.
 // Returns a map of key to bin map for each found key, or an error if the operation fails.
 func (a *AerospikeCache) MultiGet(request *MultiGetRequest) (map[string]any, error) {
+	return a.MultiGetContext(context.Background(), request)
+}
+
+func (a *AerospikeCache) MultiGetContext(ctx context.Context, request *MultiGetRequest) (map[string]any, error) {
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	verifiedRequest, err := a.verifyRequest(request)
 	if err != nil {
 		return nil, err
@@ -177,7 +267,7 @@ func (a *AerospikeCache) MultiGet(request *MultiGetRequest) (map[string]any, err
 		return nil, fmt.Errorf("failed to create aerospike keys: %w", err)
 	}
 
-	records, err := a.aero.GetClient().BatchGet(nil, keys)
+	records, err := a.aero.GetClient().BatchGet(aerospikeBatchPolicyForContext(ctx), keys)
 	if err != nil {
 		return nil, fmt.Errorf("aerospike::batchGet() failed: %w", err)
 	}
@@ -195,12 +285,24 @@ func (a *AerospikeCache) MultiGet(request *MultiGetRequest) (map[string]any, err
 // MultiSet sets multiple records in Aerospike using the provided MultiSetRequest.
 // Returns a map of key to boolean indicating whether each record was successfully written.
 func (a *AerospikeCache) MultiSet(request *MultiSetRequest) (map[string]bool, error) {
+	return a.MultiSetContext(context.Background(), request)
+}
+
+func (a *AerospikeCache) MultiSetContext(ctx context.Context, request *MultiSetRequest) (map[string]bool, error) {
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	verifiedRequest, err := a.verifyRequest(request)
 	if err != nil {
 		return nil, err
 	}
 
 	request, _ = verifiedRequest.(*MultiSetRequest)
+	if _, err := aerospikeTTL(request.TTL); err != nil {
+		return nil, err
+	}
 	var responseMap = make(map[string]bool)
 
 	var lastError error
@@ -210,7 +312,7 @@ func (a *AerospikeCache) MultiSet(request *MultiSetRequest) (map[string]bool, er
 			return nil, fmt.Errorf("failed to create aerospike key: %w", err)
 		}
 
-		err = a.aero.GetClient().Put(nil, key, fieldEntry)
+		err = a.aero.GetClient().Put(aerospikeWritePolicyForContext(ctx, request.Namespace, request.TTL), key, fieldEntry)
 		if err == nil {
 			responseMap[k] = true
 		} else {
@@ -229,6 +331,15 @@ func (a *AerospikeCache) MultiSet(request *MultiSetRequest) (map[string]bool, er
 // MultiDelete deletes multiple records in Aerospike based on the keys in the MultiDeleteRequest.
 // Returns a map of key to boolean indicating whether each record was successfully deleted.
 func (a *AerospikeCache) MultiDelete(request *MultiDeleteRequest) (map[string]bool, error) {
+	return a.MultiDeleteContext(context.Background(), request)
+}
+
+func (a *AerospikeCache) MultiDeleteContext(ctx context.Context, request *MultiDeleteRequest) (map[string]bool, error) {
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	verifiedRequest, err := a.verifyRequest(request)
 	if err != nil {
 		return nil, err
@@ -242,7 +353,7 @@ func (a *AerospikeCache) MultiDelete(request *MultiDeleteRequest) (map[string]bo
 		return nil, fmt.Errorf("failed to create aerospike keys: %w", err)
 	}
 
-	records, err := a.aero.GetClient().BatchDelete(nil, nil, keys)
+	records, err := a.aero.GetClient().BatchDelete(aerospikeBatchPolicyForContext(ctx), nil, keys)
 	if err != nil {
 		return nil, err
 	}
@@ -259,6 +370,15 @@ func (a *AerospikeCache) MultiDelete(request *MultiDeleteRequest) (map[string]bo
 // Increment performs atomic addition on one or more bins in a record specified in the IncrementRequest.
 // Returns an error if any part of the operation fails.
 func (a *AerospikeCache) Increment(request *IncrementRequest) error {
+	return a.IncrementContext(context.Background(), request)
+}
+
+func (a *AerospikeCache) IncrementContext(ctx context.Context, request *IncrementRequest) error {
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return err
+	}
+
 	verifiedRequest, err := a.verifyRequest(request)
 	if err != nil {
 		return err
@@ -276,7 +396,7 @@ func (a *AerospikeCache) Increment(request *IncrementRequest) error {
 		operations = append(operations, aerov8.AddOp(aerospike.NewBin(fieldKey, fieldVal)))
 	}
 
-	_, err = a.aero.GetClient().Operate(nil, aerospikeKey, operations...)
+	_, err = a.aero.GetClient().Operate(aerospikeWritePolicyForContext(ctx, request.Namespace, -1), aerospikeKey, operations...)
 	if err != nil {
 		return fmt.Errorf("aerospike::Add() failed: %w", err)
 	}
@@ -287,6 +407,15 @@ func (a *AerospikeCache) Increment(request *IncrementRequest) error {
 // Decrement performs atomic subtraction by using AppendOp with negative values from the DecrementRequest.
 // Returns an error if the operation fails.
 func (a *AerospikeCache) Decrement(request *DecrementRequest) error {
+	return a.DecrementContext(context.Background(), request)
+}
+
+func (a *AerospikeCache) DecrementContext(ctx context.Context, request *DecrementRequest) error {
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return err
+	}
+
 	verifiedRequest, err := a.verifyRequest(request)
 	if err != nil {
 		return err
@@ -304,7 +433,7 @@ func (a *AerospikeCache) Decrement(request *DecrementRequest) error {
 		operations = append(operations, aerov8.AddOp(aerospike.NewBin(fieldKey, -1*fieldVal)))
 	}
 
-	_, err = a.aero.GetClient().Operate(nil, aerospikeKey, operations...)
+	_, err = a.aero.GetClient().Operate(aerospikeWritePolicyForContext(ctx, request.Namespace, -1), aerospikeKey, operations...)
 	if err != nil {
 		return fmt.Errorf("aerospike::Add() failed in decrement: %w", err)
 	}
@@ -315,6 +444,15 @@ func (a *AerospikeCache) Decrement(request *DecrementRequest) error {
 // Append appends the given values to their corresponding bins in a record using the AppendRequest.
 // Returns an error if the operation fails.
 func (a *AerospikeCache) Append(request *AppendRequest) error {
+	return a.AppendContext(context.Background(), request)
+}
+
+func (a *AerospikeCache) AppendContext(ctx context.Context, request *AppendRequest) error {
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return err
+	}
+
 	verifiedRequest, err := a.verifyRequest(request)
 	if err != nil {
 		return err
@@ -332,7 +470,7 @@ func (a *AerospikeCache) Append(request *AppendRequest) error {
 		operations = append(operations, aerov8.AppendOp(aerospike.NewBin(fieldKey, fieldVal)))
 	}
 
-	_, err = a.aero.GetClient().Operate(nil, aerospikeKey, operations...)
+	_, err = a.aero.GetClient().Operate(aerospikeWritePolicyForContext(ctx, request.Namespace, -1), aerospikeKey, operations...)
 	if err != nil {
 		return fmt.Errorf("aerospike::Append(): %w", err)
 	}
@@ -343,6 +481,15 @@ func (a *AerospikeCache) Append(request *AppendRequest) error {
 // GetTTL retrieves the TTL (time to live) of a record for a given key using the GetTTLRequest.
 // Returns the TTL in seconds or an error if the retrieval fails.
 func (a *AerospikeCache) GetTTL(request *GetTTLRequest) (int64, error) {
+	return a.GetTTLContext(context.Background(), request)
+}
+
+func (a *AerospikeCache) GetTTLContext(ctx context.Context, request *GetTTLRequest) (int64, error) {
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return 0, err
+	}
+
 	verifiedRequest, err := a.verifyRequest(request)
 	if err != nil {
 		return 0, err
@@ -355,7 +502,7 @@ func (a *AerospikeCache) GetTTL(request *GetTTLRequest) (int64, error) {
 		return 0, fmt.Errorf("failed to create aerospike key: %w", err)
 	}
 
-	record, err := a.aero.GetClient().GetHeader(nil, aerospikeKey)
+	record, err := a.aero.GetClient().GetHeader(aerospikeReadPolicyForContext(ctx), aerospikeKey)
 	if err != nil {
 		return 0, fmt.Errorf("aerospike::getHeader() failed: %w", err)
 	}
@@ -366,12 +513,25 @@ func (a *AerospikeCache) GetTTL(request *GetTTLRequest) (int64, error) {
 // SetTTL updates the TTL for a given key using the SetTTLRequest.
 // Returns an error if the TTL update operation fails.
 func (a *AerospikeCache) SetTTL(request *SetTTLRequest) error {
+	return a.SetTTLContext(context.Background(), request)
+}
+
+func (a *AerospikeCache) SetTTLContext(ctx context.Context, request *SetTTLRequest) error {
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return err
+	}
+
 	verifiedRequest, err := a.verifyRequest(request)
 	if err != nil {
 		return err
 	}
 
 	request, _ = verifiedRequest.(*SetTTLRequest)
+	expiration, err := aerospikeTTL(request.TTL)
+	if err != nil {
+		return err
+	}
 
 	aerospikeKey, err := aerospikeNewKey(request.Namespace, request.Collection, request.Key)
 	if err != nil {
@@ -379,8 +539,10 @@ func (a *AerospikeCache) SetTTL(request *SetTTLRequest) error {
 	}
 
 	policy := &aerov8.WritePolicy{
-		Expiration: uint32(request.TTL),
+		BasePolicy: *aerov8.NewPolicy(),
+		Expiration: expiration,
 	}
+	applyAerospikeDeadline(ctx, &policy.BasePolicy)
 
 	err = a.aero.GetClient().Touch(policy, aerospikeKey)
 	if err != nil {
@@ -414,4 +576,14 @@ func (a *AerospikeCache) verifyRequest(request CacheRequest) (CacheRequest, erro
 	}
 
 	return request, nil
+}
+
+func aerospikeTTL(ttl int64) (uint32, error) {
+	if ttl < 0 {
+		return aerospike.DefaultRecordTTL, nil
+	}
+	if ttl > math.MaxUint32 {
+		return 0, fmt.Errorf("aerospike: TTL out of range")
+	}
+	return uint32(ttl), nil // #nosec G115 -- range checked above.
 }

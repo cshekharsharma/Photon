@@ -1,6 +1,18 @@
 // Package contract keeps all the interfaces required for background workers.
 package workers
 
+import "context"
+
+// WorkerRuntime is the per-run context handed to a worker.
+// Workers must call Beat while making healthy progress; the overseer cancels
+// this context when the worker is stale or the overseer is shutting down.
+type WorkerRuntime interface {
+	context.Context
+	Beat()
+	WorkerID() string
+	WorkerName() string
+}
+
 // Worker interface provides a common contract for all kinds of
 // background workers. These workers are monitored and managed
 // by an worker overseer, that invokes methods of worker interface's
@@ -32,10 +44,7 @@ type WorkerInterface interface {
 	// The main execution method of the worker implementation.
 	// This method is called from outside by worker overseer and
 	// is responsible for processing all the queued messages through
-	// an always running loop. In case of any exception/error or panic
-	// situation, this method should be able to recover from that and
-	// emit relevant message to the callee, so while current running
-	// instance of worker goes down, but the callee is able to respawn
-	// another similar instance to carry on the queue processing flow.
-	Run(workerChan chan<- WorkerInterface) error
+	// an always running loop. It must return when the runtime context is
+	// canceled, and call runtime.Beat while making healthy progress.
+	Run(runtime WorkerRuntime) error
 }

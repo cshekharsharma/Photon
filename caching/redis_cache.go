@@ -74,8 +74,9 @@ func (r *RedisCache) Exists(request *ExistsRequest) (bool, error) {
 }
 
 func (r *RedisCache) ExistsContext(ctx context.Context, request *ExistsRequest) (bool, error) {
-	if ctx == nil {
-		ctx = context.Background()
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return false, err
 	}
 	key := r.formatKey(request.Namespace, request.Collection, request.Key)
 
@@ -89,8 +90,9 @@ func (r *RedisCache) Get(request *GetRequest) (any, error) {
 }
 
 func (r *RedisCache) GetContext(ctx context.Context, request *GetRequest) (any, error) {
-	if ctx == nil {
-		ctx = context.Background()
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return nil, err
 	}
 	key := r.formatKey(request.Namespace, request.Collection, request.Key)
 
@@ -110,8 +112,9 @@ func (r *RedisCache) Set(request *SetRequest) (bool, error) {
 }
 
 func (r *RedisCache) SetContext(ctx context.Context, request *SetRequest) (bool, error) {
-	if ctx == nil {
-		ctx = context.Background()
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return false, err
 	}
 	key := r.formatKey(request.Namespace, request.Collection, request.Key)
 
@@ -130,8 +133,9 @@ func (r *RedisCache) Delete(request *DeleteRequest) (bool, error) {
 }
 
 func (r *RedisCache) DeleteContext(ctx context.Context, request *DeleteRequest) (bool, error) {
-	if ctx == nil {
-		ctx = context.Background()
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return false, err
 	}
 	key := r.formatKey(request.Namespace, request.Collection, request.Key)
 
@@ -145,8 +149,9 @@ func (r *RedisCache) MultiGet(request *MultiGetRequest) (map[string]any, error) 
 }
 
 func (r *RedisCache) MultiGetContext(ctx context.Context, request *MultiGetRequest) (map[string]any, error) {
-	if ctx == nil {
-		ctx = context.Background()
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return nil, err
 	}
 	formattedKeys := make([]string, len(request.Keys))
 
@@ -176,8 +181,9 @@ func (r *RedisCache) MultiSet(request *MultiSetRequest) (map[string]bool, error)
 }
 
 func (r *RedisCache) MultiSetContext(ctx context.Context, request *MultiSetRequest) (map[string]bool, error) {
-	if ctx == nil {
-		ctx = context.Background()
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return nil, err
 	}
 	result := make(map[string]bool)
 	logicalKeys := make([]string, 0, len(request.ValueMap))
@@ -232,8 +238,9 @@ func (r *RedisCache) MultiDelete(request *MultiDeleteRequest) (map[string]bool, 
 }
 
 func (r *RedisCache) MultiDeleteContext(ctx context.Context, request *MultiDeleteRequest) (map[string]bool, error) {
-	if ctx == nil {
-		ctx = context.Background()
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return nil, err
 	}
 	result := make(map[string]bool)
 	var firstErr error
@@ -255,12 +262,13 @@ func (r *RedisCache) Increment(request *IncrementRequest) error {
 }
 
 func (r *RedisCache) IncrementContext(ctx context.Context, request *IncrementRequest) error {
-	if ctx == nil {
-		ctx = context.Background()
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return err
 	}
 	key := r.formatKey(request.Namespace, request.Collection, request.Key)
 
-	_, err := r.client.GetClient().IncrBy(ctx, key, int64(request.Value)).Result()
+	_, err = r.client.GetClient().IncrBy(ctx, key, int64(request.Value)).Result()
 	return err
 }
 
@@ -270,12 +278,13 @@ func (r *RedisCache) Decrement(request *DecrementRequest) error {
 }
 
 func (r *RedisCache) DecrementContext(ctx context.Context, request *DecrementRequest) error {
-	if ctx == nil {
-		ctx = context.Background()
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return err
 	}
 	key := r.formatKey(request.Namespace, request.Collection, request.Key)
 
-	_, err := r.client.GetClient().DecrBy(ctx, key, int64(request.Value)).Result()
+	_, err = r.client.GetClient().DecrBy(ctx, key, int64(request.Value)).Result()
 	return err
 }
 
@@ -285,8 +294,9 @@ func (r *RedisCache) Append(request *AppendRequest) error {
 }
 
 func (r *RedisCache) AppendContext(ctx context.Context, request *AppendRequest) error {
-	if ctx == nil {
-		ctx = context.Background()
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return err
 	}
 	key := r.formatKey(request.Namespace, request.Collection, request.Key)
 
@@ -305,8 +315,9 @@ func (r *RedisCache) GetTTL(request *GetTTLRequest) (int64, error) {
 }
 
 func (r *RedisCache) GetTTLContext(ctx context.Context, request *GetTTLRequest) (int64, error) {
-	if ctx == nil {
-		ctx = context.Background()
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return 0, err
 	}
 	key := r.formatKey(request.Namespace, request.Collection, request.Key)
 
@@ -323,12 +334,13 @@ func (r *RedisCache) SetTTL(request *SetTTLRequest) error {
 }
 
 func (r *RedisCache) SetTTLContext(ctx context.Context, request *SetTTLRequest) error {
-	if ctx == nil {
-		ctx = context.Background()
+	ctx, err := checkedCacheContext(ctx)
+	if err != nil {
+		return err
 	}
 	key := r.formatKey(request.Namespace, request.Collection, request.Key)
 
-	_, err := r.client.GetClient().Expire(ctx, key, time.Duration(request.TTL)*time.Second).Result()
+	_, err = r.client.GetClient().Expire(ctx, key, time.Duration(request.TTL)*time.Second).Result()
 	return err
 }
 

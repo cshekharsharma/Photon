@@ -3,6 +3,7 @@ package aerospike
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -299,6 +300,7 @@ func TestRegistryHardening(t *testing.T) {
 		assert.Equal(t, uint32(44), getDefaultRecordTTL("policy"))
 		assert.Equal(t, uint32(44), GetClusterDefaultWritePolicy("policy", -1).Expiration)
 		assert.Equal(t, uint32(12), GetClusterDefaultWritePolicy("policy", 12).Expiration)
+		assert.Equal(t, uint32(44), GetClusterDefaultWritePolicy("policy", int64(math.MaxUint32)+1).Expiration)
 		assert.Equal(t, uint32(DefaultRecordTTL), GetClusterDefaultWritePolicy("missing", -1).Expiration)
 		assert.Nil(t, cloneConnectionConfig(nil))
 

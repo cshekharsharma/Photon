@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc"
@@ -92,4 +93,31 @@ func TestRetryInterceptor(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRetryInterceptorStopsBackoffOnContextCancel(t *testing.T) {
+	interceptor := RetryInterceptor(3)
+	ctx, cancel := context.WithCancel(context.Background())
+	callCount := 0
+
+	invoker := func(ctx context.Context, method string, req, reply interface{},
+		cc *grpc.ClientConn, opts ...grpc.CallOption) error {
+		callCount++
+		cancel()
+		return status.Error(codes.Unavailable, "transient")
+	}
+
+	start := time.Now()
+	err := interceptor(
+		ctx,
+		"/test.Service/Method",
+		nil,
+		nil,
+		nil,
+		invoker,
+	)
+
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, 1, callCount)
+	assert.Less(t, time.Since(start), 90*time.Millisecond)
 }

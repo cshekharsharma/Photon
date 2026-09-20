@@ -113,3 +113,17 @@ func LoadE() (Config, error) {
 
 	return cfg, nil
 }
+
+// Close stops the active config manager and clears package-level state.
+func Close() {
+	cMutex.Lock()
+	defer cMutex.Unlock()
+
+	if cManager != nil {
+		cManager.Close()
+	}
+	instance = nil
+	cProvider = ConfigProviderKoanf
+	cOptions = nil
+	cManager = nil
+}

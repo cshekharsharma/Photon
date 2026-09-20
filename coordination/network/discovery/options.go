@@ -34,6 +34,9 @@ func (o *Options) Validate() error {
 	if o.Logger == nil {
 		return errors.New("logger is required")
 	}
+	if o.TLSConfig != nil && o.TLSConfig.InsecureSkipVerify && !o.TLSConfig.AllowInsecureTLS {
+		return errors.New("insecure TLS verification requires AllowInsecureTLS")
+	}
 	return nil
 }
 
@@ -44,4 +47,5 @@ type TLSConfig struct {
 	CertFile           string // path to the client's TLS certificate.
 	KeyFile            string // path to the client's TLS private key.
 	InsecureSkipVerify bool   // if true, disables verification of the server's certificate.
+	AllowInsecureTLS   bool   // must be true to permit InsecureSkipVerify.
 }

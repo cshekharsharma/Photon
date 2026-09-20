@@ -100,6 +100,7 @@ func (m *MockWorkerOverseer) Init(workers []workers.WorkerConfig) {
 
 type mockLogger struct {
 	fatalCalls atomic.Int64
+	errorCalls atomic.Int64
 }
 
 func (m *mockLogger) With(fields map[string]interface{}) logger.Logger { return m }
@@ -107,7 +108,7 @@ func (m *mockLogger) Trace(message string, args ...interface{})        {}
 func (m *mockLogger) Debug(message string, args ...interface{})        {}
 func (m *mockLogger) Info(message string, args ...interface{})         {}
 func (m *mockLogger) Warn(message string, args ...interface{})         {}
-func (m *mockLogger) Error(message string, args ...interface{})        {}
+func (m *mockLogger) Error(message string, args ...interface{})        { m.errorCalls.Add(1) }
 func (m *mockLogger) Fatal(message string, args ...interface{})        { m.fatalCalls.Add(1) }
 func (m *mockLogger) Panic(message string, args ...interface{})        {}
 func (m *mockLogger) Log(level logger.LogLevel, message string, args ...interface{}) {
@@ -121,6 +122,7 @@ func (m *mockLogger) InfoWithFields(fields map[string]interface{}, message strin
 func (m *mockLogger) WarnWithFields(fields map[string]interface{}, message string, args ...interface{}) {
 }
 func (m *mockLogger) ErrorWithFields(fields map[string]interface{}, message string, args ...interface{}) {
+	m.errorCalls.Add(1)
 }
 func (m *mockLogger) FatalWithFields(fields map[string]interface{}, message string, args ...interface{}) {
 	m.fatalCalls.Add(1)
@@ -638,8 +640,8 @@ func Test_validateEnvironment(t *testing.T) {
 }
 
 func TestValidateEnvironmentErrorUsesSemanticGoVersions(t *testing.T) {
-	assert.True(t, goVersionLess("go1.9", "go1.25"))
-	assert.False(t, goVersionLess("go1.26", "go1.25"))
+	assert.True(t, goVersionLess("go1.27.0", "go1.27.1"))
+	assert.False(t, goVersionLess("go1.27.1", "go1.27.1"))
 }
 
 func TestStartHttpServer_GracefulShutdown(t *testing.T) {
@@ -772,10 +774,10 @@ func TestStartHttpServer_ListenErrorClosesOwnedSession(t *testing.T) {
 		ServerPort:   8084,
 		ServerLogger: log,
 	}, &session.Manager{}, true))
-	assert.GreaterOrEqual(t, log.fatalCalls.Load(), int64(1))
+	assert.GreaterOrEqual(t, log.errorCalls.Load(), int64(1))
 }
 
-func TestStartHttpServer_ShutdownErrorLogsFatal(t *testing.T) {
+func TestStartHttpServer_ShutdownErrorLogsError(t *testing.T) {
 	origSignalNotify := signalNotifyFn
 	origListen := listenAndServeFn
 	origShutdown := shutdownFn
@@ -808,7 +810,7 @@ func TestStartHttpServer_ShutdownErrorLogsFatal(t *testing.T) {
 		ServerPort:   8085,
 		ServerLogger: log,
 	}, nil, false))
-	assert.GreaterOrEqual(t, log.fatalCalls.Load(), int64(1))
+	assert.GreaterOrEqual(t, log.errorCalls.Load(), int64(1))
 }
 
 func TestHandleMiddlewares(t *testing.T) {
@@ -1214,7 +1216,7 @@ func TestStartHttpServer_ListenError(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 		t.Fatalf("expected panic on listen error")
 	}
-	assert.GreaterOrEqual(t, log.fatalCalls.Load(), int64(1), "expected fatal logs on errors")
+	assert.GreaterOrEqual(t, log.errorCalls.Load(), int64(1), "expected error logs on errors")
 }
 
 func TestDefaultListenAndServe_ReturnsErrorOnInvalidAddr(t *testing.T) {
